@@ -298,8 +298,106 @@ async function handleTgUpdate(update) {
 
   if (chatType === 'private') {
     await handleUserToGroup(message);
-  } else if (chatId === String(TG_CHAT_ID) && message.reply_to_message) {
-    await handleGroupReply(message);
+  } else if (chatId === String(TG_CHAT_ID)) {
+    // Команды в нашей рабочей группе — только от участников (всё, кто в группе).
+    if (message.text && /^\/(brief|help|start)(@\w+)?(\s|$)/.test(message.text)) {
+      await handleGroupCommand(message);
+      return;
+    }
+    if (message.reply_to_message) {
+      await handleGroupReply(message);
+    }
+  }
+}
+
+async function handleGroupCommand(message) {
+  const text = (message.text || '').trim();
+  // Снимаем возможный @mention бота — `/brief@mediakonveyer_bot args` → `/brief args`
+  const cleaned = text.replace(/^(\/[a-z]+)@\w+/, '$1');
+
+  if (/^\/(help|start)\b/.test(cleaned)) {
+    await tgApi('sendMessage', {
+      chat_id: TG_CHAT_ID,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      text:
+        '<b>Команды бота</b>\n\n' +
+        '<code>/brief Имя клиента | @username | email</code>\n' +
+        '— создать ссылку на детальный бриф (срок действия 14 дней).\n' +
+        'Email необязателен. Разделитель — символ <code>|</code>.\n\n' +
+        '<b>Примеры:</b>\n' +
+        '<code>/brief Иван Петров | @ivan | ivan@example.com</code>\n' +
+        '<code>/brief Анна, ИП «Дом» | +79991234567</code>\n' +
+        '<code>/brief Тестовый клиент</code>',
+    });
+    return;
+  }
+
+  if (/^\/brief\b/.test(cleaned)) {
+    const args = cleaned.replace(/^\/brief\s*/, '').trim();
+    if (!args) {
+      await tgApi('sendMessage', {
+        chat_id: TG_CHAT_ID,
+        parse_mode: 'HTML',
+        text:
+          '⚠️ Имя клиента не указано.\n\n' +
+          'Формат: <code>/brief Имя | @контакт | email</code>\n' +
+          'Подробнее: /help',
+        reply_to_message_id: message.message_id,
+      });
+      return;
+    }
+    const parts = args.split('|').map((s) => s.trim()).filter(Boolean);
+    const client_name = (parts[0] || '').slice(0, 200);
+    const client_contact = (parts[1] || '').slice(0, 200);
+    const email = (parts[2] || '').slice(0, 200);
+
+    if (!client_name) {
+      await tgApi('sendMessage', {
+        chat_id: TG_CHAT_ID,
+        text: '⚠️ Имя клиента пустое.',
+        reply_to_message_id: message.message_id,
+      });
+      return;
+    }
+
+    let brief;
+    try {
+      brief = briefDb.createBrief({ client_name, client_contact, email });
+    } catch (err) {
+      console.error('[brief-cmd] createBrief failed:', err.message);
+      await tgApi('sendMessage', {
+        chat_id: TG_CHAT_ID,
+        text: '❌ Не удалось создать ссылку. Попробуй ещё раз.',
+        reply_to_message_id: message.message_id,
+      });
+      return;
+    }
+
+    const briefUrl = `${PUBLIC_BASE_URL}/brief?token=${brief.token}`;
+    const expires = new Date(Date.now() + briefDb.TOKEN_LIFETIME_DAYS * 86_400_000);
+    const expiresFmt = new Intl.DateTimeFormat('ru-RU', {
+      timeZone: 'Europe/Moscow',
+      day: '2-digit', month: 'long', year: 'numeric',
+    }).format(expires);
+
+    const lines = [
+      '🔗 <b>Ссылка на бриф</b>',
+      '',
+      `👤 ${escapeHtml(client_name)}`,
+    ];
+    if (client_contact) lines.push(`📞 ${escapeHtml(client_contact)}`);
+    if (email) lines.push(`✉️ ${escapeHtml(email)}`);
+    lines.push('', `<a href="${briefUrl}">${briefUrl}</a>`, '', `<i>Действует до ${expiresFmt}.</i>`);
+
+    await tgApi('sendMessage', {
+      chat_id: TG_CHAT_ID,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      text: lines.join('\n'),
+      reply_to_message_id: message.message_id,
+    });
+    return;
   }
 }
 
