@@ -9,6 +9,7 @@ const https = require('https');
 const PORT = parseInt(process.env.PORT || '3022', 10);
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
+const TG_WEBHOOK_SECRET = process.env.TG_WEBHOOK_SECRET || '';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
   'https://media-konveyer.ru,https://www.media-konveyer.ru')
   .split(',').map(s => s.trim()).filter(Boolean);
@@ -104,18 +105,13 @@ function readBody(req, maxBytes = 16_000) {
   });
 }
 
-function tgSend(text) {
+function tgApi(method, payload) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      chat_id: TG_CHAT_ID,
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-      text,
-    });
+    const body = JSON.stringify(payload);
     const req = https.request({
       method: 'POST',
       host: 'api.telegram.org',
-      path: `/bot${TG_BOT_TOKEN}/sendMessage`,
+      path: `/bot${TG_BOT_TOKEN}/${method}`,
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body),
@@ -129,7 +125,7 @@ function tgSend(text) {
         if (res.statusCode >= 200 && res.statusCode < 300) {
           resolve(text);
         } else {
-          reject(new Error(`telegram ${res.statusCode}: ${text}`));
+          reject(new Error(`telegram ${method} ${res.statusCode}: ${text}`));
         }
       });
     });
@@ -139,6 +135,147 @@ function tgSend(text) {
     req.end();
   });
 }
+
+function tgSend(text) {
+  return tgApi('sendMessage', {
+    chat_id: TG_CHAT_ID,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    text,
+  });
+}
+
+function tgSendTo(chatId, text, replyTo) {
+  const payload = {
+    chat_id: chatId,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    text,
+  };
+  if (replyTo) payload.reply_to_message_id = replyTo;
+  return tgApi('sendMessage', payload);
+}
+
+function tgCopyTo(chatId, fromChatId, fromMessageId, caption) {
+  const payload = {
+    chat_id: chatId,
+    from_chat_id: fromChatId,
+    message_id: fromMessageId,
+  };
+  if (caption) {
+    payload.caption = caption;
+    payload.parse_mode = 'HTML';
+  }
+  return tgApi('copyMessage', payload);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bot relay: личка боту ↔ группа поддержки.
+// Юзер пишет боту → пересылаем в группу с тегом user_id.
+// Кто-то в группе делает reply на пересланное → парсим user_id из reply_to,
+// отправляем ответ юзеру в личку.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const USER_ID_TAG = '🆔 user_id:';
+
+function extractUserId(text) {
+  if (!text) return null;
+  const m = text.match(/user_id:(\d+)/);
+  return m ? m[1] : null;
+}
+
+function userLabel(from) {
+  if (!from) return 'неизвестный';
+  const name = [from.first_name, from.last_name].filter(Boolean).join(' ').trim();
+  const handle = from.username ? `@${from.username}` : '';
+  if (name && handle) return `${name} ${handle}`;
+  return name || handle || `id:${from.id}`;
+}
+
+async function handleUserToGroup(message) {
+  const from = message.from;
+  if (!from) return;
+
+  // Команда /start — приветствуем юзера, в группу не форвардим.
+  if (message.text && /^\/start(\s|$|@)/.test(message.text)) {
+    await tgSendTo(message.chat.id,
+      'Здравствуйте! 👋\n\n' +
+      'Это бот <b>МедиаКонвеер</b>. Опишите ваш вопрос — я передам Никите, ' +
+      'и он ответит вам прямо в этом чате.\n\n' +
+      '<i>Заявку на пилотный месяц удобнее оставить через форму на ' +
+      '<a href="https://media-konveyer.ru/">media-konveyer.ru</a>.</i>'
+    );
+    return;
+  }
+
+  const header = [
+    '💬 <b>Новое сообщение пользователю</b>',
+    `👤 ${escapeHtml(userLabel(from))}`,
+    `${USER_ID_TAG}${from.id}`,
+    '<i>Ответьте reply на это сообщение, чтобы написать пользователю.</i>',
+    '— — — — — — — — — — —',
+  ].join('\n');
+
+  // Если пришёл текст — шлём header + текст одним сообщением. Так reply_to.text
+  // содержит USER_ID_TAG, и парсер найдёт user_id.
+  if (message.text) {
+    const safeText = escapeHtml(message.text).slice(0, 3500);
+    await tgSendTo(TG_CHAT_ID, `${header}\n\n${safeText}`);
+    return;
+  }
+
+  // Не-текстовое (фото/документ/голос) — отправляем header первым сообщением,
+  // следом копируем оригинал с reply_to_message на header (так reply на медиа
+  // тоже даст нам user_id через цепочку reply_to).
+  const headerResp = JSON.parse(await tgSend(header));
+  const headerMsgId = headerResp?.result?.message_id;
+  if (headerMsgId) {
+    await tgApi('copyMessage', {
+      chat_id: TG_CHAT_ID,
+      from_chat_id: message.chat.id,
+      message_id: message.message_id,
+      reply_to_message_id: headerMsgId,
+    });
+  }
+}
+
+async function handleGroupReply(message) {
+  const replyTo = message.reply_to_message;
+  if (!replyTo) return;
+
+  // user_id может быть в text самого reply_to или в его reply_to_message
+  // (если это копия медиа с привязкой к header).
+  const userId = extractUserId(replyTo.text || replyTo.caption || '') ||
+                 extractUserId(replyTo.reply_to_message?.text || '');
+  if (!userId) return;
+
+  // Текст
+  if (message.text) {
+    const safeText = escapeHtml(message.text).slice(0, 3500);
+    await tgSendTo(userId, safeText);
+    // Подтверждение в группу как reaction (reply на сообщение оператора)
+    return;
+  }
+
+  // Не-текст — пробрасываем копированием с подписью
+  await tgCopyTo(userId, message.chat.id, message.message_id);
+}
+
+async function handleTgUpdate(update) {
+  const message = update.message;
+  if (!message || !message.chat) return;
+
+  const chatType = message.chat.type;
+  const chatId = String(message.chat.id);
+
+  if (chatType === 'private') {
+    await handleUserToGroup(message);
+  } else if (chatId === String(TG_CHAT_ID) && message.reply_to_message) {
+    await handleGroupReply(message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function formatLead({ name, contact, category, revenue, page, ip, ts }) {
   const dt = new Intl.DateTimeFormat('ru-RU', {
@@ -172,6 +309,27 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && req.url === '/api/health') {
     return jsonReply(res, 200, { ok: true, service: 'fc-landing-api' }, origin);
+  }
+
+  // Telegram webhook — приём апдейтов от @mediakonveyer_bot.
+  if (req.method === 'POST' && req.url === '/api/tg/webhook') {
+    const headerSecret = req.headers['x-telegram-bot-api-secret-token'];
+    if (!TG_WEBHOOK_SECRET || headerSecret !== TG_WEBHOOK_SECRET) {
+      return jsonReply(res, 401, { ok: false, error: 'bad_secret' });
+    }
+    let update;
+    try {
+      const raw = await readBody(req, 1_000_000);
+      update = JSON.parse(raw || '{}');
+    } catch (e) {
+      return jsonReply(res, 400, { ok: false, error: 'bad_json' });
+    }
+    // Отвечаем Telegram сразу 200 — обработку делаем асинхронно, чтобы не таймаутил.
+    jsonReply(res, 200, { ok: true });
+    Promise.resolve().then(() => handleTgUpdate(update)).catch((err) => {
+      console.error('[webhook] handler failed:', err.message);
+    });
+    return;
   }
 
   if (req.method !== 'POST' || req.url !== '/api/lead') {
