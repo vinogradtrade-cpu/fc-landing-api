@@ -387,13 +387,13 @@
         <div class="channels-row" data-channel>
           <div class="ch-name" data-ch-name></div>
           <div class="ch-radios">
-            <label class="ch-radio"><input type="radio" name="ch-{{key}}-status" value="главный" /><span>главный</span></label>
-            <label class="ch-radio"><input type="radio" name="ch-{{key}}-status" value="второй" /><span>второй</span></label>
-            <label class="ch-radio"><input type="radio" name="ch-{{key}}-status" value="нет" /><span>нет</span></label>
+            <label class="ch-radio"><input type="radio" name="ch-__KEY__-status" value="главный" /><span>главный</span></label>
+            <label class="ch-radio"><input type="radio" name="ch-__KEY__-status" value="второй" /><span>второй</span></label>
+            <label class="ch-radio"><input type="radio" name="ch-__KEY__-status" value="нет" /><span>нет</span></label>
           </div>
-          <input class="input" type="text" name="ch-{{key}}-followers" placeholder="подписчики" />
-          <input class="input" type="text" name="ch-{{key}}-frequency" placeholder="частота" />
-          <input class="input" type="text" name="ch-{{key}}-assets" placeholder="что снято/написано" />
+          <input class="input" type="text" name="ch-__KEY__-followers" placeholder="подписчики" />
+          <input class="input" type="text" name="ch-__KEY__-frequency" placeholder="частота" />
+          <input class="input" type="text" name="ch-__KEY__-assets" placeholder="что снято/написано" />
         </div>
       </template>
 
@@ -603,7 +603,7 @@
   const chHost = document.querySelector('[data-channels]');
   const chTpl = document.getElementById('ch-row-template');
   CHANNELS.forEach(({ key, name }) => {
-    const html = chTpl.innerHTML.replaceAll('{{key}}', key);
+    const html = chTpl.innerHTML.split('__KEY__').join(key);
     const wrap = document.createElement('div');
     wrap.innerHTML = html;
     const row = wrap.firstElementChild;
