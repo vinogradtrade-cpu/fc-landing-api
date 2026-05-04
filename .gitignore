@@ -1,0 +1,14 @@
+.DS_Store
+**/.DS_Store
+
+node_modules/
+*.log
+.tmp/
+
+.env
+.env.*
+!.env.example
+
+deploy_key
+deploy_key.pub
+*.pem

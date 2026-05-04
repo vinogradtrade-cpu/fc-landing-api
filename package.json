@@ -1,0 +1,15 @@
+{
+  "name": "fc-landing-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lead intake API for media-konveyer.ru — forwards form submissions to Telegram",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "license": "UNLICENSED"
+}
