@@ -99,9 +99,12 @@ jobs:
           . "$APP_DIR/shared/.env"
           set +a
 
-          # Запуск/перезапуск через pm2.
+          # Запуск/перезапуск через pm2. Делаем delete+start вместо startOrReload, потому что
+          # pm2 запоминает резолвенный путь к script (не симлинк) — после смены current новый
+          # код не подхватывается без явного пересоздания процесса.
           cd "$APP_DIR/current"
-          pm2 startOrReload ecosystem.config.cjs --update-env
+          pm2 delete "$APP_NAME" 2>/dev/null || true
+          pm2 start ecosystem.config.cjs --update-env
           pm2 save
 
           # Healthcheck — 5 попыток.
