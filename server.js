@@ -5,11 +5,18 @@
 
 const http = require('http');
 const https = require('https');
+const url = require('url');
+
+const briefDb = require('./db');
+const { renderRaw, simplePage } = require('./lib/render');
+const { renderBriefMd } = require('./lib/md');
 
 const PORT = parseInt(process.env.PORT || '3022', 10);
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const TG_WEBHOOK_SECRET = process.env.TG_WEBHOOK_SECRET || '';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://media-konveyer.ru';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
   'https://media-konveyer.ru,https://www.media-konveyer.ru')
   .split(',').map(s => s.trim()).filter(Boolean);
@@ -17,6 +24,9 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
 if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
   console.error('FATAL: TG_BOT_TOKEN или TG_CHAT_ID не заданы в окружении.');
   process.exit(1);
+}
+if (!ADMIN_TOKEN) {
+  console.warn('WARN: ADMIN_TOKEN не задан — админские эндпоинты отключены.');
 }
 
 const ALLOWED_CATEGORIES = new Set([
@@ -26,22 +36,36 @@ const ALLOWED_REVENUE = new Set([
   '', 'До 1 млн', '1-3 млн', '3-5 млн', '5-10 млн', 'Больше 10 млн',
 ]);
 
-// In-memory rate limit: 5 запросов / 60с с одного IP.
+// In-memory rate limit. Лиды — 5/мин, бриф — 3/мин (отдельные ключи).
 const rateBuckets = new Map();
 const RATE_WINDOW_MS = 60_000;
-const RATE_MAX = 5;
 
-function rateLimited(ip) {
+function rateLimited(ip, bucket = 'lead', max = 5) {
   const now = Date.now();
-  const entry = rateBuckets.get(ip) || [];
+  const key = `${bucket}:${ip}`;
+  const entry = rateBuckets.get(key) || [];
   const recent = entry.filter(ts => now - ts < RATE_WINDOW_MS);
-  if (recent.length >= RATE_MAX) {
-    rateBuckets.set(ip, recent);
+  if (recent.length >= max) {
+    rateBuckets.set(key, recent);
     return true;
   }
   recent.push(now);
-  rateBuckets.set(ip, recent);
+  rateBuckets.set(key, recent);
   return false;
+}
+
+function requireAdmin(req) {
+  if (!ADMIN_TOKEN) return false;
+  const h = req.headers['authorization'] || '';
+  if (h.startsWith('Bearer ')) return h.slice(7) === ADMIN_TOKEN;
+  return false;
+}
+
+function timingSafeEq(a, b) {
+  const ab = Buffer.from(a || '');
+  const bb = Buffer.from(b || '');
+  if (ab.length !== bb.length) return false;
+  return require('crypto').timingSafeEqual(ab, bb);
 }
 
 setInterval(() => {
@@ -262,6 +286,10 @@ async function handleGroupReply(message) {
 }
 
 async function handleTgUpdate(update) {
+  if (update.callback_query) {
+    await handleCallbackQuery(update.callback_query);
+    return;
+  }
   const message = update.message;
   if (!message || !message.chat) return;
 
@@ -273,6 +301,102 @@ async function handleTgUpdate(update) {
   } else if (chatId === String(TG_CHAT_ID) && message.reply_to_message) {
     await handleGroupReply(message);
   }
+}
+
+async function handleCallbackQuery(cb) {
+  const data = cb.data || '';
+  const m = data.match(/^download_brief:(\d+)$/);
+  if (!m) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Неизвестная команда' });
+    return;
+  }
+  const briefId = parseInt(m[1], 10);
+  const brief = briefDb.getBriefById(briefId);
+  if (!brief || brief.status !== 'completed') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Бриф не найден или ещё не заполнен' });
+    return;
+  }
+  await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Готовлю файл…' });
+
+  const md = renderBriefMd(brief);
+  const filename = `brief-${(brief.client_name || 'client').replace(/[^a-zA-Zа-яА-Я0-9]+/g, '_')}-${brief.id}.md`;
+  const chatId = cb.message?.chat?.id || TG_CHAT_ID;
+  await tgSendDocument(chatId, filename, md, { reply_to_message_id: cb.message?.message_id });
+}
+
+function tgSendDocument(chatId, filename, content, options = {}) {
+  const boundary = '----fclndapi' + Math.random().toString(36).slice(2);
+  const buf = Buffer.from(content, 'utf8');
+  const parts = [];
+  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`));
+  if (options.reply_to_message_id) {
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="reply_to_message_id"\r\n\r\n${options.reply_to_message_id}\r\n`));
+  }
+  if (options.caption) {
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${options.caption}\r\n`));
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nHTML\r\n`));
+  }
+  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${filename}"\r\nContent-Type: text/markdown\r\n\r\n`));
+  parts.push(buf);
+  parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+  const body = Buffer.concat(parts);
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      method: 'POST',
+      host: 'api.telegram.org',
+      path: `/bot${TG_BOT_TOKEN}/sendDocument`,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length,
+      },
+      timeout: 15_000,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve(text);
+        else reject(new Error(`sendDocument ${res.statusCode}: ${text}`));
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('sendDocument_timeout')));
+    req.write(body);
+    req.end();
+  });
+}
+
+// Уведомление о заполненном брифе — с inline-кнопкой «Скачать brief.md».
+async function notifyBriefSubmitted(brief) {
+  const channels = (() => {
+    try { return JSON.parse(brief.channels || '[]'); } catch { return []; }
+  })();
+  const main = channels.find((c) => (c.status || '').toLowerCase().includes('главн'));
+  const mainName = main?.name || '—';
+
+  const body = [
+    '✅ <b>Заполнен бриф</b>',
+    `👤 Клиент: ${escapeHtml(brief.client_name || '—')}`,
+    `📞 ${escapeHtml(brief.client_contact || '—')} | ${escapeHtml(brief.email || '—')}`,
+    `🛍 Бренд: ${escapeHtml(brief.brand_name || '—')}`,
+    `🎯 Главный канал: ${escapeHtml(mainName)}`,
+    `💰 Сегмент: ${escapeHtml(brief.segment || '—')} | средний чек: ${escapeHtml(brief.average_check || '—')}`,
+    `🎨 Тон: ${escapeHtml(brief.tone_address || '—')}, ${escapeHtml(brief.brand_position || '—')}`,
+    `⏰ Заполнен: ${escapeHtml(brief.completed_at || '—')}`,
+  ].join('\n');
+
+  await tgApi('sendMessage', {
+    chat_id: TG_CHAT_ID,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    text: body,
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '📥 Скачать brief.md', callback_data: `download_brief:${brief.id}` },
+      ]],
+    },
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -310,6 +434,157 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/api/health') {
     return jsonReply(res, 200, { ok: true, service: 'fc-landing-api' }, origin);
   }
+
+  // ─── Бриф клиента ─────────────────────────────────────────────────────────
+
+  // GET /brief?token=...  — рендер формы или сообщение
+  if (req.method === 'GET' && req.url.startsWith('/brief')) {
+    const u = url.parse(req.url, true);
+    const token = String(u.query.token || '');
+    if (!token) {
+      const p = simplePage({ title: 'Бриф', heading: 'Ссылка не найдена',
+        message: 'Откройте уникальную ссылку, которую прислал Никита.', status: 404 });
+      res.statusCode = p.status;
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.end(p.body);
+    }
+    const brief = briefDb.getBriefByToken(token);
+    if (!brief) {
+      const p = simplePage({ title: 'Бриф', heading: 'Ссылка не найдена',
+        message: 'Возможно, ссылка введена с ошибкой. Свяжитесь с Никитой — пришлёт новую.',
+        status: 404 });
+      res.statusCode = p.status;
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.end(p.body);
+    }
+    if (brief.status === 'completed' || brief.status === 'processed') {
+      const p = simplePage({ title: 'Бриф', heading: 'Бриф уже заполнен',
+        message: `Спасибо! Я работаю с вашими ответами от ${brief.completed_at || 'недавнего времени'}. Если нужно дополнить — напишите в Telegram.`,
+        status: 200 });
+      res.statusCode = p.status;
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.end(p.body);
+    }
+    if (briefDb.isExpired(brief)) {
+      const p = simplePage({ title: 'Бриф', heading: 'Ссылка истекла',
+        message: 'Ссылка на бриф действует 14 дней. Свяжитесь с Никитой — пришлёт новую.',
+        status: 410 });
+      res.statusCode = p.status;
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.end(p.body);
+    }
+    let progress = '{}';
+    try {
+      if (brief.progress_data) {
+        JSON.parse(brief.progress_data);
+        progress = brief.progress_data;
+      }
+    } catch {}
+    const html = renderRaw('brief.html', {
+      token: brief.token,
+      token_json: JSON.stringify(brief.token),
+      progress_json: progress,
+    });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    res.statusCode = 200;
+    return res.end(html);
+  }
+
+  // POST /api/admin/create-brief-link — генерация уникальной ссылки
+  if (req.method === 'POST' && req.url === '/api/admin/create-brief-link') {
+    if (!requireAdmin(req)) return jsonReply(res, 401, { ok: false, error: 'unauthorized' });
+    let payload;
+    try {
+      payload = JSON.parse(await readBody(req));
+    } catch {
+      return jsonReply(res, 400, { ok: false, error: 'bad_json' });
+    }
+    const client_name = String(payload.client_name || '').slice(0, 200).trim();
+    const client_contact = String(payload.client_contact || '').slice(0, 200).trim();
+    const email = String(payload.email || '').slice(0, 200).trim();
+    if (!client_name) return jsonReply(res, 400, { ok: false, error: 'invalid_client_name' });
+    const brief = briefDb.createBrief({ client_name, client_contact, email });
+    const expires = new Date(Date.now() + briefDb.TOKEN_LIFETIME_DAYS * 86_400_000).toISOString();
+    return jsonReply(res, 200, {
+      ok: true,
+      url: `${PUBLIC_BASE_URL}/brief?token=${brief.token}`,
+      token: brief.token,
+      brief_id: brief.id,
+      expires_at: expires,
+    });
+  }
+
+  // POST /api/brief/save-progress — автосохранение
+  if (req.method === 'POST' && req.url === '/api/brief/save-progress') {
+    const ip = clientIp(req);
+    if (rateLimited(ip, 'brief-save', 30)) {
+      return jsonReply(res, 429, { ok: false, error: 'rate_limited' });
+    }
+    let payload;
+    try { payload = JSON.parse(await readBody(req, 200_000)); } catch {
+      return jsonReply(res, 400, { ok: false, error: 'bad_json' });
+    }
+    const token = String(payload.token || '');
+    const partial = payload.partial_answers;
+    if (!token || !partial) return jsonReply(res, 400, { ok: false, error: 'invalid_payload' });
+    const brief = briefDb.getBriefByToken(token);
+    if (!brief) return jsonReply(res, 404, { ok: false, error: 'not_found' });
+    if (brief.status !== 'pending') return jsonReply(res, 409, { ok: false, error: 'not_pending' });
+    if (briefDb.isExpired(brief)) return jsonReply(res, 410, { ok: false, error: 'expired' });
+    briefDb.saveProgress(token, partial);
+    return jsonReply(res, 200, { ok: true });
+  }
+
+  // POST /api/brief/submit — финальная отправка
+  if (req.method === 'POST' && req.url === '/api/brief/submit') {
+    const ip = clientIp(req);
+    if (rateLimited(ip, 'brief-submit', 3)) {
+      return jsonReply(res, 429, { ok: false, error: 'rate_limited' });
+    }
+    let payload;
+    try { payload = JSON.parse(await readBody(req, 200_000)); } catch {
+      return jsonReply(res, 400, { ok: false, error: 'bad_json' });
+    }
+    const token = String(payload.token || '');
+    const answers = payload.answers;
+    if (!token || !answers || typeof answers !== 'object') {
+      return jsonReply(res, 400, { ok: false, error: 'invalid_payload' });
+    }
+    const brief = briefDb.getBriefByToken(token);
+    if (!brief) return jsonReply(res, 404, { ok: false, error: 'not_found' });
+    if (brief.status !== 'pending') return jsonReply(res, 409, { ok: false, error: 'not_pending' });
+    if (briefDb.isExpired(brief)) return jsonReply(res, 410, { ok: false, error: 'expired' });
+
+    const r = briefDb.submitBrief(token, answers, ip);
+    if (!r.ok) return jsonReply(res, 400, { ok: false, error: r.error });
+    try {
+      await notifyBriefSubmitted(r.brief);
+    } catch (e) {
+      console.error('[brief] notify failed:', e.message);
+    }
+    return jsonReply(res, 200, { ok: true });
+  }
+
+  // GET /api/admin/briefs/:token/download — .md файл по токену
+  if (req.method === 'GET' && req.url.startsWith('/api/admin/briefs/')) {
+    if (!requireAdmin(req)) return jsonReply(res, 401, { ok: false, error: 'unauthorized' });
+    const m = req.url.match(/^\/api\/admin\/briefs\/([\w-]+)\/download/);
+    if (!m) return jsonReply(res, 404, { ok: false, error: 'not_found' });
+    const token = m[1];
+    const brief = briefDb.getBriefByToken(token);
+    if (!brief) return jsonReply(res, 404, { ok: false, error: 'not_found' });
+    if (brief.status !== 'completed') return jsonReply(res, 409, { ok: false, error: 'not_completed' });
+    const md = renderBriefMd(brief);
+    const safeName = (brief.client_name || 'client').replace(/[^a-zA-Zа-яА-Я0-9]+/g, '_');
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="brief-${safeName}-${brief.id}.md"`);
+    return res.end(md);
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
 
   // Telegram webhook — приём апдейтов от @mediakonveyer_bot.
   if (req.method === 'POST' && req.url === '/api/tg/webhook') {
