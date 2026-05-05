@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta http-equiv="Content-Language" content="ru" />
+<title>{{title}} — МедиаКонвеер</title>
+<meta name="robots" content="noindex,nofollow" />
+<link rel="icon" type="image/webp" href="https://media-konveyer.ru/assets/favicon.webp" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet" />
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: { extend: {
+      fontFamily: { sans: ['Inter','system-ui','sans-serif'], display: ['Manrope','Inter','system-ui','sans-serif'] },
+      colors: {
+        ink: { 900:'#0A0A0B', 700:'#262629', 500:'#5B5B62', 300:'#A8A8B0', 100:'#EDEDEF', 50:'#F7F7F8' },
+        accent: { DEFAULT:'#7C3AED', soft:'#F3EEFF', strong:'#5B21B6' },
+      },
+    } },
+  };
+</script>
+
+<style>
+  body { font-family:'Inter',system-ui,sans-serif; color:#0A0A0B; background:#FAFAFB; -webkit-font-smoothing:antialiased; }
+  .font-display { font-family:'Manrope','Inter',system-ui,sans-serif; letter-spacing:-0.02em; }
+
+  .input { width:100%; padding:11px 14px; border-radius:12px; border:1px solid #E5E5EA; background:#fff;
+           font-size:15px; color:#0A0A0B; transition:border-color .15s ease, box-shadow .15s ease; }
+  .input:focus { outline:none; border-color:#7C3AED; box-shadow:0 0 0 4px rgba(124,58,237,0.12); }
+  textarea.input { min-height:96px; resize:vertical; }
+  .label { font-size:14px; font-weight:600; color:#0A0A0B; margin-bottom:6px; display:block; }
+  .label .req { color:#DC2626; margin-left:2px; }
+  .hint  { font-size:13px; color:#5B5B62; margin-top:4px; margin-bottom: 8px; }
+  .field { margin-bottom:18px; }
+  .group-title { font-size:13px; font-weight:600; color:#5B5B62; margin-bottom:8px; }
+
+  .opt { display:flex; gap:10px; align-items:flex-start; padding:10px 12px; border:1px solid #E5E5EA;
+         border-radius:10px; cursor:pointer; transition:border-color .12s ease, background .12s ease;
+         background:#fff; user-select:none; }
+  .opt:hover { border-color:#A8A8B0; background:#F7F7F8; }
+  .opt input { margin-top:2px; accent-color:#7C3AED; flex:0 0 auto; }
+  .opt-grid { display:grid; gap:8px; grid-template-columns:1fr; }
+  @media(min-width:520px) { .opt-grid.cols-2 { grid-template-columns:1fr 1fr; } }
+  @media(min-width:680px) { .opt-grid.cols-3 { grid-template-columns:1fr 1fr 1fr; } }
+  .opt:has(input:checked) { border-color:#7C3AED; background:#F3EEFF; }
+
+  .btn-primary { background:#0A0A0B; color:#fff; border-radius:12px; padding:12px 22px; font-weight:600;
+                 transition:transform .15s ease, background .15s ease; cursor:pointer; border:0; }
+  .btn-primary:hover:not(:disabled) { background:#262629; transform:translateY(-1px); }
+  .btn-primary:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-accent { background:#7C3AED; color:#fff; border-radius:12px; padding:12px 22px; font-weight:600;
+                transition:transform .15s ease, background .15s ease; cursor:pointer; border:0;
+                box-shadow:0 8px 30px rgba(124,58,237,0.35); }
+  .btn-accent:hover:not(:disabled) { background:#6D28D9; transform:translateY(-1px); }
+  .btn-accent:disabled { opacity:.5; cursor:not-allowed; box-shadow:none; }
+  .btn-ghost { background:transparent; color:#0A0A0B; border-radius:12px; padding:12px 22px; font-weight:600;
+               border:1px solid #E5E5EA; cursor:pointer; transition:background .15s ease; }
+  .btn-ghost:hover { background:#F7F7F8; border-color:#D4D4D8; }
+  .btn-ghost:disabled { opacity:.4; cursor:not-allowed; }
+
+  .step { display:none; }
+  .step.active { display:block; }
+  .card { background:#fff; border:1px solid #EDEDEF; border-radius:20px;
+          box-shadow:0 1px 2px rgba(10,10,11,0.04), 0 8px 24px rgba(10,10,11,0.06); }
+
+  .progress { height:4px; background:#EDEDEF; border-radius:999px; overflow:hidden; }
+  .progress > span { display:block; height:100%; background:linear-gradient(90deg,#7C3AED,#6366F1);
+                     width:0%; transition:width .35s ease; }
+
+  .channels-row { display:grid; grid-template-columns:1fr; gap:8px; padding:14px;
+                  border:1px solid #E5E5EA; border-radius:12px; background:#FAFAFB; margin-bottom:10px; }
+  @media(min-width:760px) {
+    .channels-row { grid-template-columns:140px 1fr 1fr 1fr 1.5fr; gap:10px; align-items:center; }
+  }
+  .channels-row .ch-name { font-weight:600; }
+  .ch-radios { display:flex; gap:6px; flex-wrap:wrap; }
+  .ch-radio { font-size:12px; padding:6px 10px; border:1px solid #E5E5EA; border-radius:999px;
+              cursor:pointer; background:#fff; }
+  .ch-radio:has(input:checked) { background:#F3EEFF; border-color:#7C3AED; color:#5B21B6; }
+  .ch-radio input { display:none; }
+
+  .save-state { font-size:12px; color:#5B5B62; }
+  .save-state.saving { color:#7C3AED; }
+  .save-state.saved { color:#16A34A; }
+  .save-state.error { color:#DC2626; }
+
+  .type-tag { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px;
+              background:#F3EEFF; color:#5B21B6; font-size:12px; font-weight:600; letter-spacing:0.04em; text-transform:uppercase; }
+</style>
+</head>
+
+<body class="antialiased">
+
+<header class="sticky top-0 z-40 backdrop-blur bg-white/80 border-b border-ink-100">
+  <div class="max-w-3xl mx-auto px-5 md:px-8 h-14 flex items-center justify-between">
+    <a href="https://media-konveyer.ru/" class="flex items-center gap-2 font-display font-bold">
+      <span class="inline-block w-2.5 h-2.5 rounded-full bg-accent"></span>
+      МедиаКонвеер
+    </a>
+    <span data-save-state class="save-state">Прогресс сохраняется автоматически</span>
+  </div>
+  <div class="max-w-3xl mx-auto px-5 md:px-8 pb-3">
+    <div class="flex items-center justify-between text-xs text-ink-500 mb-2">
+      <span class="flex items-center gap-2">
+        <span data-step-label>Шаг 1 из {{form_steps_count}}</span>
+        <span class="type-tag">{{type_title}}</span>
+      </span>
+      <a href="https://t.me/vinogradpro" target="_blank" rel="noopener" class="text-ink-500 hover:text-accent transition">не ваш бриф? →</a>
+    </div>
+    <div class="progress"><span data-progress-bar></span></div>
+  </div>
+</header>
+
+<main class="max-w-3xl mx-auto px-5 md:px-8 py-8 md:py-10">
+
+  {{#intro}}
+  <div class="card p-4 md:p-5 mb-5 bg-accent/5 border-accent/20">
+    <p class="text-sm text-ink-700 leading-relaxed">{{intro}}</p>
+  </div>
+  {{/intro}}
+
+  <form id="brief-form" novalidate>
+    <input type="hidden" name="token" value="{{token}}" />
+
+    {{form_steps}}
+
+    <div class="flex items-center justify-between gap-3 mt-6" data-nav>
+      <button type="button" class="btn-ghost" data-prev>← Назад</button>
+      <p data-nav-error class="hidden text-xs text-red-500 text-center"></p>
+      <button type="button" class="btn-accent" data-next>Далее →</button>
+      <button type="submit" class="btn-accent hidden" data-submit>Отправить бриф</button>
+    </div>
+  </form>
+</main>
+
+<script>
+(() => {
+  const TOKEN = {{token_json}};
+  const SAVED_PROGRESS = {{progress_json}};
+  const FORM_STEPS = {{form_steps_count}}; // экраны с полями (без финального «Спасибо!»)
+
+  const form = document.getElementById('brief-form');
+  const steps = form.querySelectorAll('.step');
+  const stepLabel = document.querySelector('[data-step-label]');
+  const progressBar = document.querySelector('[data-progress-bar]');
+  const saveState = document.querySelector('[data-save-state]');
+  const prevBtn = document.querySelector('[data-prev]');
+  const nextBtn = document.querySelector('[data-next]');
+  const submitBtn = document.querySelector('[data-submit]');
+  const navError = document.querySelector('[data-nav-error]');
+  const nav = document.querySelector('[data-nav]');
+
+  let current = 0;
+
+  // ─── Channels: динамическая генерация по data-attribute ───
+  function buildChannels() {
+    const hosts = form.querySelectorAll('[data-channels-host]');
+    hosts.forEach((host) => {
+      const items = JSON.parse(host.dataset.channelsItems || '[]');
+      host.innerHTML = '';
+      items.forEach(({ key, name }) => {
+        const row = document.createElement('div');
+        row.className = 'channels-row';
+        row.dataset.channel = key;
+        row.innerHTML = `
+          <div class="ch-name">${name}</div>
+          <div class="ch-radios">
+            <label class="ch-radio"><input type="radio" name="ch-${key}-status" value="главный" /><span>главный</span></label>
+            <label class="ch-radio"><input type="radio" name="ch-${key}-status" value="второй" /><span>второй</span></label>
+            <label class="ch-radio"><input type="radio" name="ch-${key}-status" value="нет" /><span>нет</span></label>
+          </div>
+          <input class="input" type="text" name="ch-${key}-followers" placeholder="подписчики/трафик" />
+          <input class="input" type="text" name="ch-${key}-frequency" placeholder="частота" />
+          <input class="input" type="text" name="ch-${key}-assets" placeholder="что снято/написано" />`;
+        host.appendChild(row);
+      });
+    });
+  }
+
+  // ─── Step navigation ───
+  function showStep(idx) {
+    current = idx;
+    steps.forEach((s) => s.classList.toggle('active', Number(s.dataset.step) === idx));
+    stepLabel.textContent = idx >= FORM_STEPS ? 'Готово' : `Шаг ${idx + 1} из ${FORM_STEPS}`;
+    progressBar.style.width = `${Math.min(100, Math.round(((idx + 1) / FORM_STEPS) * 100))}%`;
+    prevBtn.disabled = idx === 0 || idx >= FORM_STEPS;
+    const isLast = idx === FORM_STEPS - 1;
+    const isThanks = idx >= FORM_STEPS;
+    nextBtn.classList.toggle('hidden', isLast || isThanks);
+    submitBtn.classList.toggle('hidden', !isLast);
+    nav.classList.toggle('hidden', isThanks);
+    navError.classList.add('hidden');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function validateStep(idx) {
+    const section = form.querySelector(`.step[data-step="${idx}"]`);
+    if (!section) return true;
+    const required = section.querySelectorAll('[required]');
+    for (const el of required) {
+      const empty = el.type === 'checkbox' ? !el.checked : !el.value.trim();
+      if (empty) {
+        navError.textContent = 'Заполните обязательное поле, отмеченное *';
+        navError.classList.remove('hidden');
+        el.classList.add('!border-red-400');
+        el.focus();
+        return false;
+      }
+      el.classList.remove('!border-red-400');
+    }
+    return true;
+  }
+
+  prevBtn.addEventListener('click', () => { if (current > 0) showStep(current - 1); });
+  nextBtn.addEventListener('click', () => {
+    if (!validateStep(current)) return;
+    saveProgress();
+    if (current < FORM_STEPS - 1) showStep(current + 1);
+  });
+
+  // ─── Form data ───
+  function collect() {
+    const data = {};
+    const arrayFields = new Set();
+    // Сначала собираем все name'ы checkbox'ов (с [] и без)
+    for (const f of form.elements) {
+      if (!f.name) continue;
+      if (f.type === 'checkbox') {
+        const key = f.name.endsWith('[]') ? f.name.slice(0, -2) : f.name;
+        arrayFields.add(key);
+      }
+    }
+    for (const f of form.elements) {
+      if (!f.name) continue;
+      const baseName = f.name.endsWith('[]') ? f.name.slice(0, -2) : f.name;
+      if (f.type === 'checkbox') {
+        data[baseName] = data[baseName] || [];
+        if (f.checked) data[baseName].push(f.value);
+      } else if (f.type === 'radio') {
+        if (f.checked) data[baseName] = f.value;
+      } else {
+        if (baseName in data && !arrayFields.has(baseName)) continue;
+        data[baseName] = f.value;
+      }
+    }
+    // Channels
+    const chs = [];
+    form.querySelectorAll('[data-channels-host]').forEach((host) => {
+      const items = JSON.parse(host.dataset.channelsItems || '[]');
+      items.forEach(({ key, name }) => {
+        const status = (data[`ch-${key}-status`] || '').trim();
+        const followers = (data[`ch-${key}-followers`] || '').trim();
+        const frequency = (data[`ch-${key}-frequency`] || '').trim();
+        const assets = (data[`ch-${key}-assets`] || '').trim();
+        if (status || followers || frequency || assets) {
+          chs.push({ name, status, followers, frequency, assets });
+        }
+        delete data[`ch-${key}-status`];
+        delete data[`ch-${key}-followers`];
+        delete data[`ch-${key}-frequency`];
+        delete data[`ch-${key}-assets`];
+      });
+      const channelsName = host.dataset.channelsName || 'channels';
+      data[channelsName] = chs;
+    });
+    // Merge "_other" поля в основные
+    for (const key of Object.keys(data)) {
+      if (!key.endsWith('_other')) continue;
+      const base = key.slice(0, -'_other'.length);
+      const val = (data[key] || '').toString().trim();
+      if (val) {
+        if (Array.isArray(data[base])) {
+          data[base].push(`другое: ${val}`);
+        } else {
+          const cur = (data[base] || '').toString().trim();
+          data[base] = cur ? `${cur} | другое: ${val}` : `другое: ${val}`;
+        }
+      }
+      delete data[key];
+    }
+    delete data.token;
+    return data;
+  }
+
+  function restore(data) {
+    if (!data || typeof data !== 'object') return;
+    const set = (name, val) => {
+      const els = form.querySelectorAll(`[name="${name}"], [name="${name}[]"]`);
+      if (!els.length) return;
+      if (els[0].type === 'checkbox') {
+        const arr = Array.isArray(val) ? val : (val ? [val] : []);
+        els.forEach((el) => { el.checked = arr.includes(el.value); });
+      } else if (els[0].type === 'radio') {
+        els.forEach((el) => { el.checked = el.value === val; });
+      } else {
+        els[0].value = val == null ? '' : val;
+      }
+    };
+    Object.keys(data).forEach((k) => {
+      if (k === 'channels') return;
+      set(k, data[k]);
+    });
+    if (Array.isArray(data.channels)) {
+      data.channels.forEach((ch) => {
+        // По name канала ищем key через dataset
+        let chKey = null;
+        form.querySelectorAll('[data-channels-host]').forEach((host) => {
+          const items = JSON.parse(host.dataset.channelsItems || '[]');
+          const found = items.find((i) => i.name === ch.name);
+          if (found) chKey = found.key;
+        });
+        if (!chKey) return;
+        set(`ch-${chKey}-status`, ch.status);
+        set(`ch-${chKey}-followers`, ch.followers);
+        set(`ch-${chKey}-frequency`, ch.frequency);
+        set(`ch-${chKey}-assets`, ch.assets);
+      });
+    }
+  }
+
+  // ─── Persistence ───
+  const LS_KEY = `brief:${TOKEN}`;
+  let saveTimer = null;
+
+  function setSaveState(s, txt) {
+    saveState.classList.remove('saving', 'saved', 'error');
+    if (s) saveState.classList.add(s);
+    if (txt != null) saveState.textContent = txt;
+  }
+
+  async function saveProgress() {
+    const data = collect();
+    try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch {}
+    setSaveState('saving', 'Сохраняем…');
+    try {
+      const res = await fetch('/api/brief/save-progress', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: TOKEN, partial_answers: data }),
+      });
+      if (!res.ok) throw new Error(`http_${res.status}`);
+      setSaveState('saved', 'Прогресс сохранён');
+      setTimeout(() => setSaveState(null, 'Прогресс сохраняется автоматически'), 3000);
+    } catch (e) {
+      setSaveState('error', 'Сохранится локально, отправим позже');
+    }
+  }
+
+  function scheduleAutosave() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      const data = collect();
+      try { localStorage.setItem(LS_KEY, JSON.stringify(data)); } catch {}
+    }, 600);
+  }
+  form.addEventListener('input', scheduleAutosave);
+  form.addEventListener('change', scheduleAutosave);
+
+  // ─── Init ───
+  buildChannels();
+
+  let initial = SAVED_PROGRESS;
+  try {
+    const local = localStorage.getItem(LS_KEY);
+    if (local) initial = JSON.parse(local);
+  } catch {}
+  if (initial) restore(initial);
+
+  // ─── Submit ───
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!validateStep(current)) return;
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Отправляем…';
+    const answers = collect();
+    try {
+      const res = await fetch('/api/brief/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: TOKEN, answers }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.ok) throw new Error(json.error || `http_${res.status}`);
+      try { localStorage.removeItem(LS_KEY); } catch {}
+      showStep(FORM_STEPS); // экран «Спасибо»
+    } catch (err) {
+      navError.textContent = 'Не удалось отправить. Проверьте интернет и попробуйте ещё раз.';
+      navError.classList.remove('hidden');
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Отправить бриф';
+    }
+  });
+
+  showStep(0);
+})();
+</script>
+
+</body>
+</html>

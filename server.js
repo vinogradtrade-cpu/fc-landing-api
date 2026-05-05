@@ -10,6 +10,8 @@ const url = require('url');
 const briefDb = require('./db');
 const { renderRaw, simplePage } = require('./lib/render');
 const { renderBriefMd } = require('./lib/md');
+const { renderForm } = require('./lib/forms');
+const { getSchema } = require('./schemas');
 
 const PORT = parseInt(process.env.PORT || '3022', 10);
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
@@ -623,10 +625,24 @@ const server = http.createServer(async (req, res) => {
         progress = brief.progress_data;
       }
     } catch {}
-    const html = renderRaw('brief.html', {
+    const schema = getSchema(brief.brief_type);
+    if (!schema) {
+      const p = simplePage({ title: 'Бриф', heading: 'Тип брифа не поддерживается',
+        message: `Внутренняя ошибка: схема "${brief.brief_type}" не найдена. Свяжитесь с Никитой.`,
+        status: 500 });
+      res.statusCode = p.status;
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.end(p.body);
+    }
+    const html = renderRaw('form.html', {
+      title: schema.title,
+      type_title: schema.type_title,
+      intro: schema.intro || '',
       token: brief.token,
       token_json: JSON.stringify(brief.token),
       progress_json: progress,
+      form_steps: renderForm(schema),
+      form_steps_count: schema.steps.length,
     });
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
