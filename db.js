@@ -271,6 +271,16 @@ function getBriefById(id) {
   const b = db.prepare('SELECT * FROM briefs WHERE id = ?').get(id);
   return _attachData(b);
 }
+// Поиск по префиксу токена — для коротких deep-link'ов вида b_<8 hex>.
+function findBriefByShortToken(prefix) {
+  if (!prefix || typeof prefix !== 'string') return null;
+  const safe = prefix.toLowerCase().replace(/[^a-f0-9-]/g, '');
+  if (safe.length < 6) return null;
+  const b = db.prepare(
+    `SELECT * FROM briefs WHERE token LIKE ? ORDER BY created_at DESC LIMIT 1`
+  ).get(safe + '%');
+  return _attachData(b);
+}
 
 function listBriefs({ status, brief_type, limit = 50 } = {}) {
   const where = [];
@@ -451,7 +461,7 @@ module.exports = {
   BRIEF_TYPES,
   TOKEN_LIFETIME_DAYS,
   // briefs
-  createBrief, getBriefByToken, getBriefById, listBriefs, isExpired,
+  createBrief, getBriefByToken, getBriefById, findBriefByShortToken, listBriefs, isExpired,
   saveProgress, submitBrief, deleteBrief,
   // leads
   createLead, getLeadById, listLeads, updateLeadStatus,

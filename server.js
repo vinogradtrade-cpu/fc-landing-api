@@ -17,6 +17,7 @@ const PORT = parseInt(process.env.PORT || '3022', 10);
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const TG_WEBHOOK_SECRET = process.env.TG_WEBHOOK_SECRET || '';
+const TG_BOT_USERNAME = process.env.TG_BOT_USERNAME || 'mediakonveyer_bot';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://media-konveyer.ru';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
@@ -222,7 +223,41 @@ async function handleUserToGroup(message) {
   const from = message.from;
   if (!from) return;
 
-  // Команда /start — приветствуем юзера, в группу не форвардим.
+  // Команда /start с deep-link параметром b_<8 hex> — выдаём клиенту ссылку на его бриф.
+  if (message.text) {
+    const m = message.text.match(/^\/start(?:@\w+)?\s+b_([a-f0-9]{6,12})/i);
+    if (m) {
+      const short = m[1].toLowerCase();
+      const brief = briefDb.findBriefByShortToken(short);
+      if (!brief) {
+        await tgSendTo(message.chat.id,
+          '⚠️ Ссылка не найдена. Попросите оператора прислать новую.');
+        return;
+      }
+      if (brief.status !== 'pending') {
+        await tgSendTo(message.chat.id,
+          '⚠️ Этот бриф уже заполнен. Если нужно дополнить — напишите оператору.');
+        return;
+      }
+      if (briefDb.isExpired(brief)) {
+        await tgSendTo(message.chat.id,
+          '⚠️ Срок действия ссылки истёк. Попросите оператора прислать новую.');
+        return;
+      }
+      const url = briefDirectUrl(brief);
+      const greet = brief.client_name ? `, ${escapeHtml(brief.client_name)}` : '';
+      await tgSendTo(message.chat.id,
+        `Здравствуйте${greet}! 👋\n\n` +
+        '<b>МедиаКонвеер</b> — фабрика контента для маркетплейсов и услуг.\n\n' +
+        '🔗 Вот ваша персональная ссылка на бриф:\n' +
+        `${url}\n\n` +
+        '<i>Заполнение займёт 20–25 минут. Можно прерваться и вернуться по этой же ссылке — прогресс сохраняется автоматически.</i>'
+      );
+      return;
+    }
+  }
+
+  // Обычная команда /start (без параметров) — приветствуем юзера, дальше relay.
   if (message.text && /^\/start(\s|$|@)/.test(message.text)) {
     await tgSendTo(message.chat.id,
       'Здравствуйте! 👋\n\n' +
@@ -441,28 +476,16 @@ async function handleGroupCommand(message) {
       return;
     }
 
-    const briefUrl = `${PUBLIC_BASE_URL}/brief?token=${brief.token}`;
-    const expires = new Date(Date.now() + briefDb.TOKEN_LIFETIME_DAYS * 86_400_000);
-    const expiresFmt = new Intl.DateTimeFormat('ru-RU', {
-      timeZone: 'Europe/Moscow',
-      day: '2-digit', month: 'long', year: 'numeric',
-    }).format(expires);
-    const typeTitle = BRIEF_TYPE_TITLES[brief_type] || brief_type.toUpperCase();
-
-    const lines = [
-      `🔗 <b>Ссылка на бриф</b> [${escapeHtml(typeTitle)}]`,
-      '',
-      `👤 ${escapeHtml(client_name)}`,
-    ];
-    if (client_contact) lines.push(`📞 ${escapeHtml(client_contact)}`);
-    if (email) lines.push(`✉️ ${escapeHtml(email)}`);
-    lines.push('', `<a href="${briefUrl}">${briefUrl}</a>`, '', `<i>Действует до ${expiresFmt}.</i>`);
-
+    const msg = formatBriefCreatedMessage({
+      brief, briefType: brief_type,
+      clientName: client_name, clientContact: client_contact, email,
+    });
     await tgApi('sendMessage', {
       chat_id: TG_CHAT_ID,
       parse_mode: 'HTML',
       disable_web_page_preview: true,
-      text: lines.join('\n'),
+      text: msg.text,
+      reply_markup: msg.reply_markup,
       reply_to_message_id: message.message_id,
     });
     return;
@@ -788,20 +811,16 @@ async function handleCallbackQuery(cb) {
       await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Ошибка создания брифа' });
       return;
     }
-    const briefUrl = `${PUBLIC_BASE_URL}/brief?token=${brief.token}`;
     const typeTitle = BRIEF_TYPE_TITLES[briefType] || briefType.toUpperCase();
-    const expires = new Date(Date.now() + briefDb.TOKEN_LIFETIME_DAYS * 86_400_000);
-    const expiresFmt = new Intl.DateTimeFormat('ru-RU', {
-      timeZone: 'Europe/Moscow', day: '2-digit', month: 'long',
-    }).format(expires);
-
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: `Бриф [${typeTitle}] создан` });
 
-    // Редактируем оригинальное сообщение: добавляем результат, заменяем клавиатуру на «Открыть/Скопировать».
-    const newText = (cb.message?.text || '') +
-      `\n\n✅ <i>Создан бриф [${escapeHtml(typeTitle)}]</i>\n` +
-      `🔗 <a href="${briefUrl}">${briefUrl}</a>\n` +
-      `<i>Действует до ${expiresFmt}.</i>`;
+    // Редактируем оригинальное сообщение лида: вместо 4 кнопок выбора типа —
+    // блок «Создан бриф [X]» + ссылки (прямая + deep-link для клиента).
+    const msg = formatBriefCreatedMessage({
+      brief, briefType,
+      clientName: lead.name, clientContact: lead.contact, email: lead.email,
+    });
+    const newText = (cb.message?.text || '') + `\n\n✅ <i>Создан бриф</i>\n\n` + msg.text;
     try {
       await tgApi('editMessageText', {
         chat_id: cb.message.chat.id,
@@ -809,11 +828,7 @@ async function handleCallbackQuery(cb) {
         parse_mode: 'HTML',
         disable_web_page_preview: true,
         text: newText,
-        reply_markup: {
-          inline_keyboard: [[
-            { text: '🔗 Открыть бриф', url: briefUrl },
-          ]],
-        },
+        reply_markup: msg.reply_markup,
       });
     } catch (e) {
       console.error('[lead-cb] editMessageText failed:', e.message);
@@ -952,27 +967,16 @@ async function handleCallbackQuery(cb) {
       await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Ошибка создания' });
       return;
     }
-    const briefUrl = `${PUBLIC_BASE_URL}/brief?token=${brief.token}`;
-    const typeTitle = BRIEF_TYPE_TITLES[ctx.brief_type] || ctx.brief_type;
-    const expires = new Date(Date.now() + briefDb.TOKEN_LIFETIME_DAYS * 86_400_000);
-    const expiresFmt = new Intl.DateTimeFormat('ru-RU', {
-      timeZone: 'Europe/Moscow', day: '2-digit', month: 'long',
-    }).format(expires);
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Бриф создан' });
+    const msg = formatBriefCreatedMessage({
+      brief, briefType: ctx.brief_type,
+      clientName: ctx.client_name, clientContact: ctx.client_contact, email: ctx.email,
+    });
     return tgApi('editMessageText', {
       chat_id: cb.message.chat.id, message_id: cb.message.message_id,
       parse_mode: 'HTML', disable_web_page_preview: true,
-      text: [
-        `🔗 <b>Ссылка на бриф</b> [${escapeHtml(typeTitle)}]`,
-        '',
-        `👤 ${escapeHtml(ctx.client_name)}`,
-        ctx.client_contact ? `📞 ${escapeHtml(ctx.client_contact)}` : null,
-        ctx.email ? `✉️ ${escapeHtml(ctx.email)}` : null,
-        '',
-        `<a href="${briefUrl}">${briefUrl}</a>`,
-        `<i>Действует до ${expiresFmt}.</i>`,
-      ].filter(Boolean).join('\n'),
-      reply_markup: { inline_keyboard: [[{ text: '🔗 Открыть бриф', url: briefUrl }]] },
+      text: msg.text,
+      reply_markup: msg.reply_markup,
     });
   }
 
@@ -1024,6 +1028,56 @@ function tgSendDocument(chatId, filename, content, options = {}) {
 
 // Уведомление о заполненном брифе — с inline-кнопкой «Скачать brief.md».
 const BRIEF_TYPE_TITLES = { seller: 'СЕЛЛЕР', expert: 'ЭКСПЕРТ', agency: 'УСЛУГИ / B2B' };
+
+function shortToken(token) {
+  return (token || '').slice(0, 8);
+}
+
+function briefDirectUrl(brief) {
+  return `${PUBLIC_BASE_URL}/brief?token=${brief.token}`;
+}
+
+function briefDeepLink(brief) {
+  return `https://t.me/${TG_BOT_USERNAME}?start=b_${shortToken(brief.token)}`;
+}
+
+function formatBriefCreatedMessage({ brief, briefType, clientName, clientContact, email }) {
+  const typeTitle = BRIEF_TYPE_TITLES[briefType] || briefType.toUpperCase();
+  const directUrl = briefDirectUrl(brief);
+  const deepLink = briefDeepLink(brief);
+  const expires = new Date(Date.now() + briefDb.TOKEN_LIFETIME_DAYS * 86_400_000);
+  const expiresFmt = new Intl.DateTimeFormat('ru-RU', {
+    timeZone: 'Europe/Moscow', day: '2-digit', month: 'long',
+  }).format(expires);
+
+  const lines = [
+    `🔗 <b>Ссылка на бриф</b> [${escapeHtml(typeTitle)}]`,
+    '',
+    `👤 ${escapeHtml(clientName || '—')}`,
+  ];
+  if (clientContact) lines.push(`📞 ${escapeHtml(clientContact)}`);
+  if (email) lines.push(`✉️ ${escapeHtml(email)}`);
+  lines.push(
+    '',
+    '<b>Прямая ссылка</b> (для теста или если у клиента нет Telegram):',
+    `<a href="${directUrl}">${directUrl}</a>`,
+    '',
+    '📲 <b>Для клиента в Telegram</b> — скопируй и пришли ему:',
+    `<code>${deepLink}</code>`,
+    '<i>Клиент нажмёт → появится бот → жмёт START → бот сам пришлёт ссылку.</i>',
+    '',
+    `<i>Действует до ${expiresFmt}.</i>`,
+  );
+  return {
+    text: lines.join('\n'),
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '🔗 Открыть бриф (себе)', url: directUrl },
+        { text: '📲 Скопировать для клиента', url: deepLink },
+      ]],
+    },
+  };
+}
 
 function summarizeBrief(brief) {
   const d = brief.data || {};
