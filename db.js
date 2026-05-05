@@ -316,7 +316,8 @@ function submitBrief(token, answers, ipAddress) {
   if (!brief) return { ok: false, error: 'not_found' };
   if (brief.status !== 'pending') return { ok: false, error: 'already_submitted' };
 
-  const tx = db.transaction(() => {
+  db.exec('BEGIN');
+  try {
     db.prepare(`
       UPDATE briefs SET status = 'completed',
                         completed_at = CURRENT_TIMESTAMP,
@@ -331,8 +332,12 @@ function submitBrief(token, answers, ipAddress) {
       INSERT INTO ${dataTable} (brief_id, data) VALUES (?, ?)
       ON CONFLICT(brief_id) DO UPDATE SET data = excluded.data
     `).run(brief.id, json);
-  });
-  tx();
+
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
 
   return { ok: true, brief: getBriefById(brief.id) };
 }
