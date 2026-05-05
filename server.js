@@ -301,11 +301,20 @@ async function handleTgUpdate(update) {
   if (chatType === 'private') {
     await handleUserToGroup(message);
   } else if (chatId === String(TG_CHAT_ID)) {
-    // Команды в нашей рабочей группе — только от участников (всё, кто в группе).
-    if (message.text && /^\/(brief|help|start)(@\w+)?(\s|$)/.test(message.text)) {
+    // 1) Pending state машины диалога — приоритет
+    if (message.from && message.text && !message.text.startsWith('/')) {
+      const state = briefDb.getBotState(message.from.id);
+      if (state && state.state.startsWith('new_brief:')) {
+        await handleNewBriefMessage(message, state);
+        return;
+      }
+    }
+    // 2) Команды
+    if (message.text && /^\/(brief|help|start|menu|list_briefs|stats|new_brief|cancel)(@\w+)?(\s|$)/.test(message.text)) {
       await handleGroupCommand(message);
       return;
     }
+    // 3) Reply на пересланное (relay support)
     if (message.reply_to_message) {
       await handleGroupReply(message);
     }
@@ -317,23 +326,63 @@ async function handleGroupCommand(message) {
   // Снимаем возможный @mention бота — `/brief@mediakonveyer_bot args` → `/brief args`
   const cleaned = text.replace(/^(\/[a-z]+)@\w+/, '$1');
 
-  if (/^\/(help|start)\b/.test(cleaned)) {
+  if (/^\/(start|menu)\b/.test(cleaned)) {
+    await sendMainMenu(message.message_id);
+    return;
+  }
+  if (/^\/help\b/.test(cleaned)) {
     await tgApi('sendMessage', {
       chat_id: TG_CHAT_ID,
       parse_mode: 'HTML',
       disable_web_page_preview: true,
       text:
         '<b>Команды бота</b>\n\n' +
-        '<code>/brief Имя | @контакт | email | тип</code>\n' +
-        '— создать ссылку на детальный бриф (срок действия 14 дней).\n' +
-        'Email и тип необязательны. Разделитель — символ <code>|</code>.\n\n' +
-        '<b>Тип:</b> <code>seller</code> (по умолчанию) · <code>expert</code> · <code>agency</code>\n\n' +
+        '<code>/menu</code> — главное меню\n' +
+        '<code>/new_brief</code> — создать бриф через диалог\n' +
+        '<code>/brief Имя | @контакт | email | тип</code> — быстрое создание ссылки\n' +
+        '<code>/list_briefs [filter]</code> — список последних брифов\n' +
+        '<code>/stats</code> — статистика за 30 дней\n' +
+        '<code>/cancel</code> — отменить текущий диалог\n\n' +
+        '<b>Тип брифа:</b> <code>seller</code> (по умолчанию) · <code>expert</code> · <code>agency</code>\n\n' +
+        '<b>Фильтры /list_briefs:</b> <code>pending</code> · <code>completed</code> · <code>expired</code> · ' +
+        '<code>seller</code> · <code>expert</code> · <code>agency</code>\n\n' +
         '<b>Примеры:</b>\n' +
         '<code>/brief Иван Петров | @ivan | ivan@example.com</code>\n' +
         '<code>/brief Анна Карьера | @anna | anna@mail.ru | expert</code>\n' +
-        '<code>/brief ООО Ромашка | hello@romashka.ru | | agency</code>\n' +
-        '<code>/brief Тестовый клиент</code>',
+        '<code>/list_briefs pending</code>',
     });
+    return;
+  }
+
+  if (/^\/menu\b/.test(cleaned)) {
+    await sendMainMenu(message.message_id);
+    return;
+  }
+
+  if (/^\/cancel\b/.test(cleaned)) {
+    const had = briefDb.getBotState(message.from.id);
+    briefDb.clearBotState(message.from.id);
+    await tgApi('sendMessage', {
+      chat_id: TG_CHAT_ID,
+      text: had ? '❌ Текущий диалог отменён.' : 'Нет активного диалога.',
+      reply_to_message_id: message.message_id,
+    });
+    return;
+  }
+
+  if (/^\/new_brief\b/.test(cleaned)) {
+    await startNewBriefDialog(message);
+    return;
+  }
+
+  if (/^\/list_briefs\b/.test(cleaned)) {
+    const filter = (cleaned.replace(/^\/list_briefs\s*/, '').trim() || '').toLowerCase();
+    await sendBriefsList(filter, message.message_id);
+    return;
+  }
+
+  if (/^\/stats\b/.test(cleaned)) {
+    await sendStats(message.message_id);
     return;
   }
 
@@ -418,6 +467,271 @@ async function handleGroupCommand(message) {
     });
     return;
   }
+}
+
+// ─── Главное меню и сводки ────────────────────────────────────────────────────
+
+const STATUS_ICON = { pending: '⚪', in_progress: '🟡', completed: '🟢', expired: '🔴' };
+const TYPE_TAG = { seller: 'СЕЛЛЕР', expert: 'ЭКСПЕРТ', agency: 'B2B' };
+
+function mainMenuKeyboard() {
+  const newLeads = briefDb.listLeads({ status: 'new', limit: 999 }).length;
+  const totalBriefs = briefDb.listBriefs({ limit: 999 }).length;
+  return {
+    inline_keyboard: [
+      [{ text: `🔥 Новые заявки (${newLeads})`, callback_data: 'menu:leads' }],
+      [{ text: `📋 Брифы (${totalBriefs})`, callback_data: 'menu:briefs' }],
+      [{ text: '➕ Создать бриф вручную', callback_data: 'menu:new_brief' }],
+      [{ text: '📈 Статистика', callback_data: 'menu:stats' }],
+    ],
+  };
+}
+
+async function sendMainMenu(replyToMessageId) {
+  return tgApi('sendMessage', {
+    chat_id: TG_CHAT_ID,
+    parse_mode: 'HTML',
+    text: '<b>📊 Главное меню МедиаКонвеер</b>\n\nВыбери действие:',
+    reply_markup: mainMenuKeyboard(),
+    reply_to_message_id: replyToMessageId,
+  });
+}
+
+function shortDate(stamp) {
+  if (!stamp) return '—';
+  const s = String(stamp);
+  // 2026-05-05 12:37:37 → 05.05 12:37
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/);
+  return m ? `${m[3]}.${m[2]} ${m[4]}:${m[5]}` : s.slice(0, 16);
+}
+
+function effectiveStatus(b) {
+  if (b.status === 'pending' && briefDb.isExpired(b)) return 'expired';
+  return b.status;
+}
+
+function formatBriefsList(briefs, filter) {
+  if (!briefs.length) {
+    return `<b>📋 Брифы</b>${filter ? ` <i>(фильтр: ${escapeHtml(filter)})</i>` : ''}\n\n<i>Пока нет.</i>`;
+  }
+  const lines = [
+    `<b>📋 Брифы</b>${filter ? ` <i>(фильтр: ${escapeHtml(filter)})</i>` : ''}`,
+    '',
+    '<i>🟢 Заполнен · 🟡 В процессе · ⚪ Не начат · 🔴 Истёк</i>',
+    '',
+  ];
+  for (const b of briefs) {
+    const st = effectiveStatus(b);
+    const icon = STATUS_ICON[st] || '⚪';
+    const tag = TYPE_TAG[b.brief_type] || (b.brief_type || '').toUpperCase();
+    const name = b.client_name || '—';
+    const date = shortDate(b.completed_at || b.created_at);
+    lines.push(`${icon} <b>${escapeHtml(name)}</b> [${escapeHtml(tag)}] · ${escapeHtml(date)}`);
+  }
+  return lines.join('\n');
+}
+
+async function sendBriefsList(filter, replyToMessageId) {
+  let opts = { limit: 30 };
+  if (['pending', 'completed', 'in_progress'].includes(filter)) opts.status = filter;
+  if (briefDb.BRIEF_TYPES.includes(filter)) opts.brief_type = filter;
+  let briefs = briefDb.listBriefs(opts);
+  if (filter === 'expired') {
+    briefs = briefs.filter((b) => effectiveStatus(b) === 'expired');
+  }
+  return tgApi('sendMessage', {
+    chat_id: TG_CHAT_ID,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    text: formatBriefsList(briefs, filter),
+    reply_to_message_id: replyToMessageId,
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '⚪ pending', callback_data: 'briefs:pending' },
+        { text: '🟢 completed', callback_data: 'briefs:completed' },
+        { text: '🔴 expired', callback_data: 'briefs:expired' },
+      ], [
+        { text: '🛒 seller', callback_data: 'briefs:seller' },
+        { text: '🎓 expert', callback_data: 'briefs:expert' },
+        { text: '🏢 agency', callback_data: 'briefs:agency' },
+      ], [
+        { text: '⬅ Меню', callback_data: 'menu:home' },
+      ]],
+    },
+  });
+}
+
+function formatStats() {
+  const s = briefDb.getStats({ daysBack: 30 });
+  const conv = s.leads ? Math.round((s.leadsProcessed / s.leads) * 100) : 0;
+  const filledPct = s.briefsTotal ? Math.round((s.briefsCompleted / s.briefsTotal) * 100) : 0;
+  const byType = { seller: { total: 0, completed: 0 }, expert: { total: 0, completed: 0 }, agency: { total: 0, completed: 0 } };
+  for (const r of s.byType) {
+    if (byType[r.brief_type]) byType[r.brief_type] = { total: r.total, completed: r.completed };
+  }
+  return [
+    '<b>📈 Статистика</b> <i>(за 30 дней)</i>',
+    '',
+    `Заявок с лендинга: <b>${s.leads}</b>`,
+    `Конвертировано в бриф: <b>${s.leadsProcessed}</b> (${conv}%)`,
+    `Заполнено брифов: <b>${s.briefsCompleted}</b> из ${s.briefsTotal} (${filledPct}%)`,
+    '',
+    '<b>По типам:</b>',
+    `🛒 Селлер — ${byType.seller.completed} / ${byType.seller.total}`,
+    `🎓 Эксперт — ${byType.expert.completed} / ${byType.expert.total}`,
+    `🏢 B2B — ${byType.agency.completed} / ${byType.agency.total}`,
+    '',
+    `Истёкшие без заполнения: ${s.expired}`,
+  ].join('\n');
+}
+
+async function sendStats(replyToMessageId) {
+  return tgApi('sendMessage', {
+    chat_id: TG_CHAT_ID,
+    parse_mode: 'HTML',
+    text: formatStats(),
+    reply_to_message_id: replyToMessageId,
+    reply_markup: { inline_keyboard: [[{ text: '⬅ Меню', callback_data: 'menu:home' }]] },
+  });
+}
+
+async function sendLeadsList(replyToMessageId) {
+  const leads = briefDb.listLeads({ status: 'new', limit: 20 });
+  if (!leads.length) {
+    return tgApi('sendMessage', {
+      chat_id: TG_CHAT_ID,
+      parse_mode: 'HTML',
+      text: '<b>🔥 Новые заявки</b>\n\n<i>Пока нет.</i>',
+      reply_to_message_id: replyToMessageId,
+      reply_markup: { inline_keyboard: [[{ text: '⬅ Меню', callback_data: 'menu:home' }]] },
+    });
+  }
+  const lines = ['<b>🔥 Новые заявки</b>', ''];
+  for (const l of leads) {
+    lines.push(`#${l.id} · <b>${escapeHtml(l.name || '—')}</b> · ${escapeHtml(l.contact || '—')} · ${escapeHtml(l.category || '—')} · ${shortDate(l.created_at)}`);
+  }
+  lines.push('', '<i>Чтобы создать бриф из заявки — открой исходное сообщение в группе и выбери тип.</i>');
+  return tgApi('sendMessage', {
+    chat_id: TG_CHAT_ID,
+    parse_mode: 'HTML',
+    text: lines.join('\n'),
+    reply_to_message_id: replyToMessageId,
+    reply_markup: { inline_keyboard: [[{ text: '⬅ Меню', callback_data: 'menu:home' }]] },
+  });
+}
+
+// ─── Диалог /new_brief (state machine через bot_states) ───────────────────────
+
+const NEW_BRIEF_CANCEL_KB = { inline_keyboard: [[{ text: '❌ Отмена', callback_data: 'new_brief:cancel' }]] };
+
+async function startNewBriefDialog(message) {
+  briefDb.setBotState(message.from.id, 'new_brief:name', {});
+  return tgApi('sendMessage', {
+    chat_id: TG_CHAT_ID,
+    parse_mode: 'HTML',
+    text: '<b>➕ Новый бриф</b>\n\n<b>Шаг 1/4:</b> Имя клиента?\n\n<i>Просто напишите ответом.</i>',
+    reply_markup: NEW_BRIEF_CANCEL_KB,
+    reply_to_message_id: message.message_id,
+  });
+}
+
+async function handleNewBriefMessage(message, state) {
+  const userId = message.from.id;
+  const ctx = state.context || {};
+  const text = (message.text || '').trim();
+
+  if (state.state === 'new_brief:name') {
+    if (text.length < 1 || text.length > 200) {
+      return tgApi('sendMessage', {
+        chat_id: TG_CHAT_ID, text: '⚠️ Имя должно быть 1–200 символов. Попробуйте ещё раз или /cancel.',
+        reply_to_message_id: message.message_id,
+      });
+    }
+    ctx.client_name = text;
+    briefDb.setBotState(userId, 'new_brief:contact', ctx);
+    return tgApi('sendMessage', {
+      chat_id: TG_CHAT_ID, parse_mode: 'HTML',
+      text: `Имя: <b>${escapeHtml(text)}</b>\n\n<b>Шаг 2/4:</b> Контакт (Telegram, телефон или email)?`,
+      reply_markup: NEW_BRIEF_CANCEL_KB,
+      reply_to_message_id: message.message_id,
+    });
+  }
+
+  if (state.state === 'new_brief:contact') {
+    if (text.length < 3 || text.length > 200) {
+      return tgApi('sendMessage', {
+        chat_id: TG_CHAT_ID, text: '⚠️ Контакт должен быть 3–200 символов.',
+        reply_to_message_id: message.message_id,
+      });
+    }
+    ctx.client_contact = text;
+    briefDb.setBotState(userId, 'new_brief:email', ctx);
+    return tgApi('sendMessage', {
+      chat_id: TG_CHAT_ID, parse_mode: 'HTML',
+      text: `Контакт: <b>${escapeHtml(text)}</b>\n\n<b>Шаг 3/4:</b> Email (опционально, можно пропустить)`,
+      reply_markup: { inline_keyboard: [
+        [{ text: '⏭ Пропустить', callback_data: 'new_brief:skip_email' }],
+        [{ text: '❌ Отмена', callback_data: 'new_brief:cancel' }],
+      ] },
+      reply_to_message_id: message.message_id,
+    });
+  }
+
+  if (state.state === 'new_brief:email') {
+    if (text.length > 200) {
+      return tgApi('sendMessage', {
+        chat_id: TG_CHAT_ID, text: '⚠️ Email слишком длинный.',
+        reply_to_message_id: message.message_id,
+      });
+    }
+    ctx.email = text;
+    briefDb.setBotState(userId, 'new_brief:type', ctx);
+    return sendNewBriefTypeStep(message.message_id);
+  }
+  // type / confirm — только через кнопки
+}
+
+async function sendNewBriefTypeStep(replyToMessageId) {
+  return tgApi('sendMessage', {
+    chat_id: TG_CHAT_ID, parse_mode: 'HTML',
+    text: '<b>Шаг 4/4:</b> Тип брифа?',
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '🛒 Селлер', callback_data: 'new_brief:type:seller' },
+          { text: '🎓 Эксперт', callback_data: 'new_brief:type:expert' },
+          { text: '🏢 B2B', callback_data: 'new_brief:type:agency' },
+        ],
+        [{ text: '❌ Отмена', callback_data: 'new_brief:cancel' }],
+      ],
+    },
+    reply_to_message_id: replyToMessageId,
+  });
+}
+
+async function sendNewBriefConfirm(userId, ctx, chatMsgId) {
+  briefDb.setBotState(userId, 'new_brief:confirm', ctx);
+  const typeTitle = BRIEF_TYPE_TITLES[ctx.brief_type] || ctx.brief_type;
+  const lines = [
+    '<b>✅ Подтверждение</b>',
+    '',
+    `👤 Имя: <b>${escapeHtml(ctx.client_name)}</b>`,
+    `📞 Контакт: <b>${escapeHtml(ctx.client_contact)}</b>`,
+    ctx.email ? `📧 Email: <b>${escapeHtml(ctx.email)}</b>` : '📧 Email: <i>не указан</i>',
+    `🏷 Тип: <b>${escapeHtml(typeTitle)}</b>`,
+    '',
+    '<i>Создать ссылку?</i>',
+  ];
+  return tgApi('sendMessage', {
+    chat_id: TG_CHAT_ID, parse_mode: 'HTML', text: lines.join('\n'),
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '✅ Создать', callback_data: 'new_brief:confirm' },
+        { text: '❌ Отмена', callback_data: 'new_brief:cancel' },
+      ]],
+    },
+    reply_to_message_id: chatMsgId,
+  });
 }
 
 async function handleCallbackQuery(cb) {
@@ -536,6 +850,130 @@ async function handleCallbackQuery(cb) {
       console.error('[lead-cb] reject editMessageText failed:', e.message);
     }
     return;
+  }
+
+  // ─── Главное меню ─────────────────────────────────────────────────────
+  if (data === 'menu:home') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    return tgApi('editMessageText', {
+      chat_id: cb.message.chat.id, message_id: cb.message.message_id,
+      parse_mode: 'HTML',
+      text: '<b>📊 Главное меню МедиаКонвеер</b>\n\nВыбери действие:',
+      reply_markup: mainMenuKeyboard(),
+    });
+  }
+  if (data === 'menu:leads') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    return sendLeadsList(cb.message.message_id);
+  }
+  if (data === 'menu:briefs') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    return sendBriefsList('', cb.message.message_id);
+  }
+  if (data === 'menu:stats') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    return sendStats(cb.message.message_id);
+  }
+  if (data === 'menu:new_brief') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    briefDb.setBotState(cb.from.id, 'new_brief:name', {});
+    return tgApi('sendMessage', {
+      chat_id: TG_CHAT_ID, parse_mode: 'HTML',
+      text: '<b>➕ Новый бриф</b>\n\n<b>Шаг 1/4:</b> Имя клиента?\n\n<i>Просто напишите ответом.</i>',
+      reply_markup: NEW_BRIEF_CANCEL_KB,
+    });
+  }
+
+  // ─── Фильтры списка брифов ────────────────────────────────────────────
+  m = data.match(/^briefs:(\w+)$/);
+  if (m) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: m[1] });
+    return sendBriefsList(m[1], cb.message.message_id);
+  }
+
+  // ─── Диалог /new_brief ────────────────────────────────────────────────
+  if (data === 'new_brief:cancel') {
+    briefDb.clearBotState(cb.from.id);
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Отменено' });
+    return tgApi('editMessageReplyMarkup', {
+      chat_id: cb.message.chat.id, message_id: cb.message.message_id,
+      reply_markup: { inline_keyboard: [] },
+    }).catch(() => {});
+  }
+
+  if (data === 'new_brief:skip_email') {
+    const state = briefDb.getBotState(cb.from.id);
+    if (!state || state.state !== 'new_brief:email') {
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Сессия истекла' });
+      return;
+    }
+    state.context.email = '';
+    briefDb.setBotState(cb.from.id, 'new_brief:type', state.context);
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    return sendNewBriefTypeStep(cb.message.message_id);
+  }
+
+  m = data.match(/^new_brief:type:(\w+)$/);
+  if (m) {
+    const briefType = m[1];
+    if (!briefDb.BRIEF_TYPES.includes(briefType)) {
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Неизвестный тип' });
+      return;
+    }
+    const state = briefDb.getBotState(cb.from.id);
+    if (!state || state.state !== 'new_brief:type') {
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Сессия истекла' });
+      return;
+    }
+    state.context.brief_type = briefType;
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: BRIEF_TYPE_TITLES[briefType] });
+    return sendNewBriefConfirm(cb.from.id, state.context, cb.message.message_id);
+  }
+
+  if (data === 'new_brief:confirm') {
+    const state = briefDb.getBotState(cb.from.id);
+    if (!state || state.state !== 'new_brief:confirm') {
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Сессия истекла' });
+      return;
+    }
+    const ctx = state.context;
+    let brief;
+    try {
+      brief = briefDb.createBrief({
+        brief_type: ctx.brief_type,
+        client_name: ctx.client_name,
+        client_contact: ctx.client_contact,
+        email: ctx.email,
+        source: 'bot',
+      });
+      briefDb.clearBotState(cb.from.id);
+    } catch (e) {
+      console.error('[new_brief] createBrief failed:', e.message);
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Ошибка создания' });
+      return;
+    }
+    const briefUrl = `${PUBLIC_BASE_URL}/brief?token=${brief.token}`;
+    const typeTitle = BRIEF_TYPE_TITLES[ctx.brief_type] || ctx.brief_type;
+    const expires = new Date(Date.now() + briefDb.TOKEN_LIFETIME_DAYS * 86_400_000);
+    const expiresFmt = new Intl.DateTimeFormat('ru-RU', {
+      timeZone: 'Europe/Moscow', day: '2-digit', month: 'long',
+    }).format(expires);
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Бриф создан' });
+    return tgApi('editMessageText', {
+      chat_id: cb.message.chat.id, message_id: cb.message.message_id,
+      parse_mode: 'HTML', disable_web_page_preview: true,
+      text: [
+        `🔗 <b>Ссылка на бриф</b> [${escapeHtml(typeTitle)}]`,
+        '',
+        `👤 ${escapeHtml(ctx.client_name)}`,
+        ctx.client_contact ? `📞 ${escapeHtml(ctx.client_contact)}` : null,
+        ctx.email ? `✉️ ${escapeHtml(ctx.email)}` : null,
+        '',
+        `<a href="${briefUrl}">${briefUrl}</a>`,
+        `<i>Действует до ${expiresFmt}.</i>`,
+      ].filter(Boolean).join('\n'),
+      reply_markup: { inline_keyboard: [[{ text: '🔗 Открыть бриф', url: briefUrl }]] },
+    });
   }
 
   await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Неизвестная команда' });
