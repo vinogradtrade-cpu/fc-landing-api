@@ -257,12 +257,12 @@ async function handleUserToGroup(message) {
     }
   }
 
-  // Обычная команда /start (без параметров) — приветствуем юзера, дальше relay.
-  if (message.text && /^\/start(\s|$|@)/.test(message.text)) {
+  // Обычная команда /start или /help — приветствуем юзера, в группу не форвардим.
+  if (message.text && /^\/(start|help)(\s|$|@)/.test(message.text)) {
     await tgSendTo(message.chat.id,
       'Здравствуйте! 👋\n\n' +
-      'Это бот <b>МедиаКонвеер</b>. Опишите ваш вопрос — я передам Никите, ' +
-      'и он ответит вам прямо в этом чате.\n\n' +
+      'Это бот <b>МедиаКонвеер</b>. Просто опишите свой вопрос здесь — ' +
+      'я передам его Никите, и он ответит вам в этом же чате.\n\n' +
       '<i>Заявку на пилотный месяц удобнее оставить через форму на ' +
       '<a href="https://media-konveyer.ru/">media-konveyer.ru</a>.</i>'
     );
@@ -277,25 +277,42 @@ async function handleUserToGroup(message) {
     '— — — — — — — — — — —',
   ].join('\n');
 
-  // Если пришёл текст — шлём header + текст одним сообщением. Так reply_to.text
-  // содержит USER_ID_TAG, и парсер найдёт user_id.
+  // Текст — шлём header + текст одним сообщением.
   if (message.text) {
     const safeText = escapeHtml(message.text).slice(0, 3500);
     await tgSendTo(TG_CHAT_ID, `${header}\n\n${safeText}`);
-    return;
+  } else {
+    // Не-текстовое (фото/документ/голос) — header первым, копия — reply на него.
+    const headerResp = JSON.parse(await tgSend(header));
+    const headerMsgId = headerResp?.result?.message_id;
+    if (headerMsgId) {
+      await tgApi('copyMessage', {
+        chat_id: TG_CHAT_ID,
+        from_chat_id: message.chat.id,
+        message_id: message.message_id,
+        reply_to_message_id: headerMsgId,
+      });
+    }
   }
 
-  // Не-текстовое (фото/документ/голос) — отправляем header первым сообщением,
-  // следом копируем оригинал с reply_to_message на header (так reply на медиа
-  // тоже даст нам user_id через цепочку reply_to).
-  const headerResp = JSON.parse(await tgSend(header));
-  const headerMsgId = headerResp?.result?.message_id;
-  if (headerMsgId) {
-    await tgApi('copyMessage', {
-      chat_id: TG_CHAT_ID,
-      from_chat_id: message.chat.id,
-      message_id: message.message_id,
-      reply_to_message_id: headerMsgId,
+  // Подтверждение пользователю в личке: «принято» с rate-limit (раз в 30 минут на user_id).
+  // Хранится в bot_states, чтобы спам-сообщения не получали 10 «принято» подряд.
+  const SUPPORT_GREET_TTL_MS = 30 * 60 * 1000;
+  const prev = briefDb.getBotState(from.id);
+  const lastGreet = prev?.context?.support_greeted_at || 0;
+  if (Date.now() - lastGreet > SUPPORT_GREET_TTL_MS) {
+    await tgSendTo(message.chat.id,
+      '✅ <b>Спасибо, ваше сообщение получено</b>\n\n' +
+      'Никита ответит вам прямо здесь, в этом чате — обычно в течение ' +
+      'нескольких часов в рабочее время (будни 10:00–19:00 МСК).\n\n' +
+      '<i>Можете писать дополнения и уточнения сюда же.</i>'
+    );
+    // Сохраняем флаг — но не сбрасываем активный диалог /new_brief (если есть).
+    const isInDialog = (prev?.state || '').startsWith('new_brief:');
+    const stateName = isInDialog ? prev.state : 'support';
+    briefDb.setBotState(from.id, stateName, {
+      ...(prev?.context || {}),
+      support_greeted_at: Date.now(),
     });
   }
 }
