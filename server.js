@@ -1041,6 +1041,35 @@ function briefDeepLink(brief) {
   return `https://t.me/${TG_BOT_USERNAME}?start=b_${shortToken(brief.token)}`;
 }
 
+function firstName(fullName) {
+  if (!fullName) return '';
+  const trimmed = String(fullName).trim();
+  const m = trimmed.match(/^[^\s,]+/);
+  return m ? m[0] : trimmed.slice(0, 30);
+}
+
+function clientReadyText({ clientName, deepLink, directUrl }) {
+  const name = firstName(clientName);
+  const greet = name ? `Здравствуйте, ${name}!` : 'Здравствуйте!';
+  return [
+    `${greet} Спасибо за заявку с media-konveyer.ru.`,
+    '',
+    'Чтобы я подготовил стратегию и контент-план, заполните детальный бриф (20–25 минут, прогресс сохраняется автоматически).',
+    '',
+    `📲 Если есть Telegram — нажмите на ссылку, в чате с ботом нажмите START, он пришлёт форму:`,
+    deepLink,
+    '',
+    `🌐 Если удобнее в браузере:`,
+    directUrl,
+    '',
+    '— МедиаКонвеер',
+  ].join('\n');
+}
+
+function isEmailLike(s) {
+  return s && /@/.test(s) && /\./.test(s) && !s.startsWith('@');
+}
+
 function formatBriefCreatedMessage({ brief, briefType, clientName, clientContact, email }) {
   const typeTitle = BRIEF_TYPE_TITLES[briefType] || briefType.toUpperCase();
   const directUrl = briefDirectUrl(brief);
@@ -1049,6 +1078,8 @@ function formatBriefCreatedMessage({ brief, briefType, clientName, clientContact
   const expiresFmt = new Intl.DateTimeFormat('ru-RU', {
     timeZone: 'Europe/Moscow', day: '2-digit', month: 'long',
   }).format(expires);
+
+  const readyText = clientReadyText({ clientName, deepLink, directUrl });
 
   const lines = [
     `🔗 <b>Ссылка на бриф</b> [${escapeHtml(typeTitle)}]`,
@@ -1059,23 +1090,31 @@ function formatBriefCreatedMessage({ brief, briefType, clientName, clientContact
   if (email) lines.push(`✉️ ${escapeHtml(email)}`);
   lines.push(
     '',
-    '<b>Прямая ссылка</b> (для теста или если у клиента нет Telegram):',
-    `<a href="${directUrl}">${directUrl}</a>`,
+    '<b>📤 Готовый текст для клиента</b> <i>(тапни на блок ниже и удерживай → «Скопировать»):</i>',
+    '<blockquote>' + escapeHtml(readyText) + '</blockquote>',
     '',
-    '📲 <b>Для клиента в Telegram</b> — скопируй и пришли ему:',
-    `<code>${deepLink}</code>`,
-    '<i>Клиент нажмёт → появится бот → жмёт START → бот сам пришлёт ссылку.</i>',
+    '<i>Перешли клиенту любым каналом: Telegram, email, мессенджер.</i>',
     '',
-    `<i>Действует до ${expiresFmt}.</i>`,
+    `<i>Бриф действует до ${expiresFmt}.</i>`,
   );
+
+  // Кнопки: открыть бриф, скопировать deep-link, и (если email) — готовый mailto:
+  const row1 = [
+    { text: '🔗 Открыть бриф', url: directUrl },
+    { text: '📲 Открыть deep-link', url: deepLink },
+  ];
+  const keyboard = [row1];
+  if (isEmailLike(email)) {
+    const subject = encodeURIComponent('Бриф МедиаКонвеер');
+    const body = encodeURIComponent(readyText);
+    keyboard.push([
+      { text: '✉️ Отправить email клиенту', url: `mailto:${email}?subject=${subject}&body=${body}` },
+    ]);
+  }
+
   return {
     text: lines.join('\n'),
-    reply_markup: {
-      inline_keyboard: [[
-        { text: '🔗 Открыть бриф (себе)', url: directUrl },
-        { text: '📲 Скопировать для клиента', url: deepLink },
-      ]],
-    },
+    reply_markup: { inline_keyboard: keyboard },
   };
 }
 
