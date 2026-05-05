@@ -322,12 +322,14 @@ async function handleGroupCommand(message) {
       disable_web_page_preview: true,
       text:
         '<b>Команды бота</b>\n\n' +
-        '<code>/brief Имя клиента | @username | email</code>\n' +
+        '<code>/brief Имя | @контакт | email | тип</code>\n' +
         '— создать ссылку на детальный бриф (срок действия 14 дней).\n' +
-        'Email необязателен. Разделитель — символ <code>|</code>.\n\n' +
+        'Email и тип необязательны. Разделитель — символ <code>|</code>.\n\n' +
+        '<b>Тип:</b> <code>seller</code> (по умолчанию) · <code>expert</code> · <code>agency</code>\n\n' +
         '<b>Примеры:</b>\n' +
         '<code>/brief Иван Петров | @ivan | ivan@example.com</code>\n' +
-        '<code>/brief Анна, ИП «Дом» | +79991234567</code>\n' +
+        '<code>/brief Анна Карьера | @anna | anna@mail.ru | expert</code>\n' +
+        '<code>/brief ООО Ромашка | hello@romashka.ru | | agency</code>\n' +
         '<code>/brief Тестовый клиент</code>',
     });
     return;
@@ -341,16 +343,19 @@ async function handleGroupCommand(message) {
         parse_mode: 'HTML',
         text:
           '⚠️ Имя клиента не указано.\n\n' +
-          'Формат: <code>/brief Имя | @контакт | email</code>\n' +
+          'Формат: <code>/brief Имя | @контакт | email | тип</code>\n' +
           'Подробнее: /help',
         reply_to_message_id: message.message_id,
       });
       return;
     }
-    const parts = args.split('|').map((s) => s.trim()).filter(Boolean);
+    // parts могут быть пустыми между |, поэтому не filter(Boolean)
+    const parts = args.split('|').map((s) => s.trim());
     const client_name = (parts[0] || '').slice(0, 200);
     const client_contact = (parts[1] || '').slice(0, 200);
     const email = (parts[2] || '').slice(0, 200);
+    const typeArg = (parts[3] || 'seller').toLowerCase();
+    const brief_type = briefDb.BRIEF_TYPES.includes(typeArg) ? typeArg : null;
 
     if (!client_name) {
       await tgApi('sendMessage', {
@@ -360,10 +365,21 @@ async function handleGroupCommand(message) {
       });
       return;
     }
+    if (!brief_type) {
+      await tgApi('sendMessage', {
+        chat_id: TG_CHAT_ID,
+        parse_mode: 'HTML',
+        text: `⚠️ Неизвестный тип брифа: <code>${escapeHtml(typeArg)}</code>.\n` +
+              `Доступные: <code>seller</code> · <code>expert</code> · <code>agency</code>`,
+        reply_to_message_id: message.message_id,
+      });
+      return;
+    }
 
     let brief;
     try {
-      brief = briefDb.createBrief({ client_name, client_contact, email });
+      brief = briefDb.createBrief({ brief_type, client_name, client_contact, email,
+                                     source: 'bot' });
     } catch (err) {
       console.error('[brief-cmd] createBrief failed:', err.message);
       await tgApi('sendMessage', {
@@ -380,9 +396,10 @@ async function handleGroupCommand(message) {
       timeZone: 'Europe/Moscow',
       day: '2-digit', month: 'long', year: 'numeric',
     }).format(expires);
+    const typeTitle = BRIEF_TYPE_TITLES[brief_type] || brief_type.toUpperCase();
 
     const lines = [
-      '🔗 <b>Ссылка на бриф</b>',
+      `🔗 <b>Ссылка на бриф</b> [${escapeHtml(typeTitle)}]`,
       '',
       `👤 ${escapeHtml(client_name)}`,
     ];
@@ -466,29 +483,57 @@ function tgSendDocument(chatId, filename, content, options = {}) {
 }
 
 // Уведомление о заполненном брифе — с inline-кнопкой «Скачать brief.md».
-async function notifyBriefSubmitted(brief) {
-  const channels = (() => {
-    try { return JSON.parse(brief.channels || '[]'); } catch { return []; }
-  })();
-  const main = channels.find((c) => (c.status || '').toLowerCase().includes('главн'));
-  const mainName = main?.name || '—';
+const BRIEF_TYPE_TITLES = { seller: 'СЕЛЛЕР', expert: 'ЭКСПЕРТ', agency: 'УСЛУГИ / B2B' };
 
-  const body = [
-    '✅ <b>Заполнен бриф</b>',
+function summarizeBrief(brief) {
+  const d = brief.data || {};
+  const channels = Array.isArray(d.channels) ? d.channels : [];
+  const main = channels.find((c) => (c.status || '').toLowerCase().includes('главн'));
+  const mainCh = main?.name || '—';
+
+  if (brief.brief_type === 'expert') {
+    return [
+      `🎯 Ниша: ${escapeHtml(d.niche || '—')}`,
+      `📚 Главный продукт: ${escapeHtml(d.main_product_name || '—')}` +
+        (d.main_product_price ? ` · ${escapeHtml(d.main_product_price)}` : ''),
+      `🎨 Тон: ${escapeHtml(d.tone_address || '—')}, ${escapeHtml(d.expert_position || '—')}`,
+      `📊 Главный канал: ${escapeHtml(mainCh)}`,
+    ];
+  }
+  if (brief.brief_type === 'agency') {
+    return [
+      `🏢 Компания: ${escapeHtml(d.company_name || '—')}`,
+      `🛠 Главная услуга: ${escapeHtml(d.main_service_name || '—')}` +
+        (d.main_service_price ? ` · ${escapeHtml(d.main_service_price)}` : ''),
+      `🎨 Тон: ${escapeHtml(d.tone_address || '—')}, ${escapeHtml(d.brand_position || '—')}`,
+      `📊 Главный канал: ${escapeHtml(mainCh)}`,
+    ];
+  }
+  // seller (default)
+  return [
+    `🛍 Бренд: ${escapeHtml(d.brand_name || '—')}`,
+    `🎯 Главный канал: ${escapeHtml(mainCh)}`,
+    `💰 Сегмент: ${escapeHtml(d.segment || '—')} | средний чек: ${escapeHtml(d.average_check || '—')}`,
+    `🎨 Тон: ${escapeHtml(d.tone_address || '—')}, ${escapeHtml(d.brand_position || '—')}`,
+  ];
+}
+
+async function notifyBriefSubmitted(brief) {
+  const d = brief.data || {};
+  const typeTitle = BRIEF_TYPE_TITLES[brief.brief_type] || brief.brief_type.toUpperCase();
+  const lines = [
+    `✅ <b>Заполнен бриф</b> [${escapeHtml(typeTitle)}]`,
     `👤 Клиент: ${escapeHtml(brief.client_name || '—')}`,
-    `📞 ${escapeHtml(brief.client_contact || '—')} | ${escapeHtml(brief.email || '—')}`,
-    `🛍 Бренд: ${escapeHtml(brief.brand_name || '—')}`,
-    `🎯 Главный канал: ${escapeHtml(mainName)}`,
-    `💰 Сегмент: ${escapeHtml(brief.segment || '—')} | средний чек: ${escapeHtml(brief.average_check || '—')}`,
-    `🎨 Тон: ${escapeHtml(brief.tone_address || '—')}, ${escapeHtml(brief.brand_position || '—')}`,
+    `📞 ${escapeHtml(brief.client_contact || '—')} | ${escapeHtml(brief.email || d.email || '—')}`,
+    ...summarizeBrief(brief),
     `⏰ Заполнен: ${escapeHtml(brief.completed_at || '—')}`,
-  ].join('\n');
+  ];
 
   await tgApi('sendMessage', {
     chat_id: TG_CHAT_ID,
     parse_mode: 'HTML',
     disable_web_page_preview: true,
-    text: body,
+    text: lines.join('\n'),
     reply_markup: {
       inline_keyboard: [[
         { text: '📥 Скачать brief.md', callback_data: `download_brief:${brief.id}` },
@@ -602,8 +647,14 @@ const server = http.createServer(async (req, res) => {
     const client_name = String(payload.client_name || '').slice(0, 200).trim();
     const client_contact = String(payload.client_contact || '').slice(0, 200).trim();
     const email = String(payload.email || '').slice(0, 200).trim();
+    const briefType = String(payload.brief_type || 'seller').toLowerCase();
     if (!client_name) return jsonReply(res, 400, { ok: false, error: 'invalid_client_name' });
-    const brief = briefDb.createBrief({ client_name, client_contact, email });
+    if (!briefDb.BRIEF_TYPES.includes(briefType)) {
+      return jsonReply(res, 400, { ok: false, error: 'invalid_brief_type' });
+    }
+    const brief = briefDb.createBrief({
+      brief_type: briefType, client_name, client_contact, email, source: 'manual',
+    });
     const expires = new Date(Date.now() + briefDb.TOKEN_LIFETIME_DAYS * 86_400_000).toISOString();
     return jsonReply(res, 200, {
       ok: true,
