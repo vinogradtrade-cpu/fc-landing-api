@@ -422,23 +422,123 @@ async function handleGroupCommand(message) {
 
 async function handleCallbackQuery(cb) {
   const data = cb.data || '';
-  const m = data.match(/^download_brief:(\d+)$/);
-  if (!m) {
-    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Неизвестная команда' });
-    return;
-  }
-  const briefId = parseInt(m[1], 10);
-  const brief = briefDb.getBriefById(briefId);
-  if (!brief || brief.status !== 'completed') {
-    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Бриф не найден или ещё не заполнен' });
-    return;
-  }
-  await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Готовлю файл…' });
 
-  const md = renderBriefMd(brief);
-  const filename = `brief-${(brief.client_name || 'client').replace(/[^a-zA-Zа-яА-Я0-9]+/g, '_')}-${brief.id}.md`;
-  const chatId = cb.message?.chat?.id || TG_CHAT_ID;
-  await tgSendDocument(chatId, filename, md, { reply_to_message_id: cb.message?.message_id });
+  // Скачать .md по brief_id (кнопка под уведомлением о заполненном брифе)
+  let m = data.match(/^download_brief:(\d+)$/);
+  if (m) {
+    const briefId = parseInt(m[1], 10);
+    const brief = briefDb.getBriefById(briefId);
+    if (!brief || brief.status !== 'completed') {
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Бриф не найден или ещё не заполнен' });
+      return;
+    }
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Готовлю файл…' });
+    const md = renderBriefMd(brief);
+    const filename = `brief-${(brief.client_name || 'client').replace(/[^a-zA-Zа-яА-Я0-9]+/g, '_')}-${brief.id}.md`;
+    const chatId = cb.message?.chat?.id || TG_CHAT_ID;
+    await tgSendDocument(chatId, filename, md, { reply_to_message_id: cb.message?.message_id });
+    return;
+  }
+
+  // Конверсия лида в бриф: lead:create:<lead_id>:<type>
+  m = data.match(/^lead:create:(\d+):(\w+)$/);
+  if (m) {
+    const leadId = parseInt(m[1], 10);
+    const briefType = m[2];
+    if (!briefDb.BRIEF_TYPES.includes(briefType)) {
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Неизвестный тип' });
+      return;
+    }
+    const lead = briefDb.getLeadById(leadId);
+    if (!lead) {
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Лид не найден' });
+      return;
+    }
+    if (lead.status !== 'new') {
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Лид уже обработан' });
+      return;
+    }
+    let brief;
+    try {
+      brief = briefDb.createBrief({
+        brief_type: briefType,
+        client_name: lead.name,
+        client_contact: lead.contact,
+        email: lead.email,
+        source: 'landing',
+        lead_id: leadId,
+      });
+      briefDb.updateLeadStatus(leadId, 'processed', brief.id);
+    } catch (err) {
+      console.error('[lead-cb] create brief failed:', err.message);
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Ошибка создания брифа' });
+      return;
+    }
+    const briefUrl = `${PUBLIC_BASE_URL}/brief?token=${brief.token}`;
+    const typeTitle = BRIEF_TYPE_TITLES[briefType] || briefType.toUpperCase();
+    const expires = new Date(Date.now() + briefDb.TOKEN_LIFETIME_DAYS * 86_400_000);
+    const expiresFmt = new Intl.DateTimeFormat('ru-RU', {
+      timeZone: 'Europe/Moscow', day: '2-digit', month: 'long',
+    }).format(expires);
+
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: `Бриф [${typeTitle}] создан` });
+
+    // Редактируем оригинальное сообщение: добавляем результат, заменяем клавиатуру на «Открыть/Скопировать».
+    const newText = (cb.message?.text || '') +
+      `\n\n✅ <i>Создан бриф [${escapeHtml(typeTitle)}]</i>\n` +
+      `🔗 <a href="${briefUrl}">${briefUrl}</a>\n` +
+      `<i>Действует до ${expiresFmt}.</i>`;
+    try {
+      await tgApi('editMessageText', {
+        chat_id: cb.message.chat.id,
+        message_id: cb.message.message_id,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        text: newText,
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '🔗 Открыть бриф', url: briefUrl },
+          ]],
+        },
+      });
+    } catch (e) {
+      console.error('[lead-cb] editMessageText failed:', e.message);
+    }
+    return;
+  }
+
+  // Отклонение лида: lead:reject:<id>
+  m = data.match(/^lead:reject:(\d+)$/);
+  if (m) {
+    const leadId = parseInt(m[1], 10);
+    const lead = briefDb.getLeadById(leadId);
+    if (!lead) {
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Лид не найден' });
+      return;
+    }
+    if (lead.status !== 'new') {
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Лид уже обработан' });
+      return;
+    }
+    briefDb.updateLeadStatus(leadId, 'rejected');
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Отклонено' });
+    const newText = (cb.message?.text || '') + `\n\n❌ <i>Отклонено</i>`;
+    try {
+      await tgApi('editMessageText', {
+        chat_id: cb.message.chat.id,
+        message_id: cb.message.message_id,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        text: newText,
+        reply_markup: { inline_keyboard: [] },
+      });
+    } catch (e) {
+      console.error('[lead-cb] reject editMessageText failed:', e.message);
+    }
+    return;
+  }
+
+  await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Неизвестная команда' });
 }
 
 function tgSendDocument(chatId, filename, content, options = {}) {
@@ -546,25 +646,42 @@ async function notifyBriefSubmitted(brief) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-function formatLead({ name, contact, category, revenue, page, ip, ts }) {
+function formatLead({ id, name, contact, email, category, revenue, page, ip, ts }) {
   const dt = new Intl.DateTimeFormat('ru-RU', {
     timeZone: 'Europe/Moscow',
     day: '2-digit', month: '2-digit', year: 'numeric',
     hour: '2-digit', minute: '2-digit',
   }).format(ts);
-  return [
-    '🆕 <b>Новая заявка</b> с media-konveyer.ru',
+  const lines = [
+    `🔥 <b>Новая заявка</b> с media-konveyer.ru${id ? ` <code>#${id}</code>` : ''}`,
     '',
     `👤 <b>Имя:</b> ${escapeHtml(name)}`,
     `📞 <b>Контакт:</b> ${escapeHtml(contact)}`,
+  ];
+  if (email) lines.push(`✉️ <b>Email:</b> ${escapeHtml(email)}`);
+  lines.push(
     `🏷 <b>Категория:</b> ${escapeHtml(category)}`,
     `💰 <b>Оборот:</b> ${escapeHtml(revenue || 'не указан')}`,
     '',
     `🌐 <b>Страница:</b> ${escapeHtml(page || '-')}`,
     `🕒 ${dt} МСК`,
     `🌍 IP: <code>${escapeHtml(ip)}</code>`,
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
+
+const LEAD_KEYBOARD = (leadId) => ({
+  inline_keyboard: [
+    [
+      { text: '💼 Селлер',  callback_data: `lead:create:${leadId}:seller` },
+      { text: '🎓 Эксперт', callback_data: `lead:create:${leadId}:expert` },
+    ],
+    [
+      { text: '🏢 B2B',         callback_data: `lead:create:${leadId}:agency` },
+      { text: '❌ Отклонить',   callback_data: `lead:reject:${leadId}` },
+    ],
+  ],
+});
 
 const server = http.createServer(async (req, res) => {
   const origin = pickOrigin(req);
@@ -796,6 +913,7 @@ const server = http.createServer(async (req, res) => {
 
   const name = String(payload.name || '').trim();
   const contact = String(payload.contact || '').trim();
+  const email = String(payload.email || '').trim();
   const category = String(payload.category || '').trim();
   const revenue = String(payload.revenue || '').trim();
   const consent = payload.consent === true || payload.consent === 'on' || payload.consent === '1';
@@ -817,19 +935,37 @@ const server = http.createServer(async (req, res) => {
     return jsonReply(res, 400, { ok: false, error: 'consent_required' }, origin);
   }
 
+  // Сохраняем в БД, потом шлём в TG с inline-кнопками выбора типа брифа.
+  let lead;
+  try {
+    lead = briefDb.createLead({
+      name, contact, email, category, revenue,
+      ip_address: ip, page,
+    });
+  } catch (err) {
+    console.error('[lead] db save failed:', err.message);
+    return jsonReply(res, 500, { ok: false, error: 'db_failed' }, origin);
+  }
+
   const text = formatLead({
-    name, contact, category, revenue, page, ip, ts: new Date(),
+    id: lead.id, name, contact, email, category, revenue, page, ip, ts: new Date(),
   });
 
   try {
-    await tgSend(text);
+    await tgApi('sendMessage', {
+      chat_id: TG_CHAT_ID,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      text,
+      reply_markup: LEAD_KEYBOARD(lead.id),
+    });
   } catch (err) {
     console.error('[lead] telegram send failed:', err.message);
+    // лид в БД — не теряем, но клиенту вернём 502
     return jsonReply(res, 502, { ok: false, error: 'telegram_failed' }, origin);
   }
 
-  // Не логируем PII — только метку.
-  console.log('[lead] delivered', { ts: new Date().toISOString(), category, ip });
+  console.log('[lead] delivered', { id: lead.id, ts: new Date().toISOString(), category, ip });
   return jsonReply(res, 200, { ok: true }, origin);
 });
 
